@@ -5,6 +5,7 @@ from sparsemax import Sparsemax
 
 
 class TabNetModel(nn.Module):
+    """Module for TabNet architecture."""
 
     params = {}
 
@@ -15,23 +16,23 @@ class TabNetModel(nn.Module):
         if self.params["feat_transform_fc_dim"] % 2 != 0:
             raise ValueError("Fully connected dimension size must be even")
 
-        self.feature_transformer_shared = SharedFeatureTransformer(**self.params)
-        self.feature_transformer_individual_base = IndividualFeatureTransformer(
+        self.__feature_transformer_shared = SharedFeatureTransformer(**self.params)
+        self.__feature_transformer_individual_base = IndividualFeatureTransformer(
             -1, **self.params
         )
-        self.feature_transformer_individual = nn.ModuleList(
+        self.__feature_transformer_individual = nn.ModuleList(
             [
                 IndividualFeatureTransformer(i, **self.params)
                 for i in range(self.params["n_steps"])
             ]
         )
-        self.attentive_transformer = nn.ModuleList(
+        self.__attentive_transformer = nn.ModuleList(
             [
                 AttentiveTransformer(i, **self.params)
                 for i in range(self.params["n_steps"])
             ]
         )
-        self.reconstruction_fc = nn.ModuleList(
+        self.__reconstruction_fc = nn.ModuleList(
             [
                 nn.Linear(
                     int(self.params["feat_transform_fc_dim"] / 2),
@@ -40,7 +41,7 @@ class TabNetModel(nn.Module):
                 for i in range(self.params["n_steps"])
             ]
         )
-        self.output_fc = nn.Linear(
+        self.__output_fc = nn.Linear(
             int(self.params["feat_transform_fc_dim"] / 2), self.params["n_output_dims"]
         )
 
@@ -51,8 +52,8 @@ class TabNetModel(nn.Module):
                 ", got order {} tensor".format(len(list(X.size())))
             )
         X_bn = nn.BatchNorm1d(self.params["n_input_dims"])(X)
-        X_bn_pp = self.feature_transformer_individual_base(
-            self.feature_transformer_shared(X_bn)
+        X_bn_pp = self.__feature_transformer_individual_base(
+            self.__feature_transformer_shared(X_bn)
         )
 
         feat_prev = X_bn_pp
@@ -66,23 +67,23 @@ class TabNetModel(nn.Module):
         step_wise_masks = []
 
         for i in range(self.params["n_steps"]):
-            mask = self.attentive_transformer[i](feat_prev, p_prev)
+            mask = self.__attentive_transformer[i](feat_prev, p_prev)
             X_i_in = torch.mul(mask, X_bn)
-            feat_prev = self.feature_transformer_individual[i](
-                self.feature_transformer_shared(X_i_in)
+            feat_prev = self.__feature_transformer_individual[i](
+                self.__feature_transformer_shared(X_i_in)
             )
             p_prev = torch.mul(p_prev, gamma - mask)
             step_wise_masks.append(mask)
             step_wise_outputs.append(nn.functional.relu(feat_prev))
             step_wise_feature_reconstruction.append(
-                self.reconstruction_fc[i](feat_prev)
+                self.__reconstruction_fc[i](feat_prev)
             )
 
         reconstructions = torch.stack(step_wise_feature_reconstruction, dim=0).sum(
             dim=0, keepdim=False
         )
 
-        logits = self.output_fc(
+        logits = self.__output_fc(
             torch.stack(step_wise_outputs, dim=0).sum(dim=0, keepdim=False)
         )
 
