@@ -14,7 +14,8 @@ class TabNet(object):
 
     default_train_params = {
         "batch_size": 8192,
-        "self_supervised_pre_training": False,
+        "run_self_supervised_training": False,
+        "run_supervised_training": True,
         "early_stopping": True,
         "early_stopping_min_delta_pct": 0,
         "early_stopping_patience": 20,
@@ -180,7 +181,12 @@ class TabNet(object):
         return np.vectorize(inv_target_mapping.get)(ordinal_predictions).squeeze()
 
     def __train(
-        self, train_generator, val_generator=None, epochs=None, self_supervised=False
+        self,
+        train_generator,
+        val_generator=None,
+        epochs=None,
+        self_supervised=False,
+        step_offset=0,
     ):
         """Internal function to fit a TabNet model to an input dataset, with a
         provided number of epochs. Supports early stopping (configured through
@@ -194,12 +200,13 @@ class TabNet(object):
         train_generator : torch.utils.DataLoader generator for the training dataset
         val_generator : torch.utils.DataLoader generator for the validation dataset
         epochs : the maximum number of training epochs
-        self_supervised: flag to use a self-supervision training objective, as
+        self_supervised : flag to use a self-supervision training objective, as
         opposed to a prediction training objective
+        step_offset : the step offset to start logging from
 
         Returns
         -------
-        None : Model parameters are updated in-place
+        step : The number of steps the model was trained for
         """
         # Define optimizer
         optimizer = torch.optim.AdamW(
@@ -232,7 +239,7 @@ class TabNet(object):
                 percentage=True,
             )
         # Training
-        step = 0
+        step = step_offset
         for c_epoch in range(epochs):
             loss_avg = []
             for batch_idx, (x_batch, y_batch) in enumerate(train_generator):
@@ -406,6 +413,7 @@ class TabNet(object):
                     )
                 )
         self.__save_model("final", self_supervised)
+        return step
 
     def __validation_reconstruct_loss(self, generator):
         """Returns model reconstruction loss for an input dataset.
@@ -552,28 +560,32 @@ class TabNet(object):
         )
         self.model.train()  # Enable training mode
 
-        if not self.train_params["self_supervised_pre_training"]:
-            print("Training predictive model (WITHOUT self-supervised pre-training...)")
-            self.__train(
-                train_generator=train_generator,
-                val_generator=val_generator,
-                epochs=self.train_params["max_epochs_supervised"],
-                self_supervised=False,
+        if not (
+            self.train_params["run_self_supervised_training"]
+            and self.train_params["run_supervised_training"]
+        ):
+            raise ValueError(
+                "No training scheme defined: set `run_self_supervised_training` or `run_supervised_training` to True"
             )
-        else:
-            print("Training self-supervised model...")
-            self.__train(
+
+        step = 0
+        if not self.train_params["run_self_supervised_training"]:
+            print("Training model with self-supervision objective")
+            step = self.__train(
                 train_generator=train_generator,
                 val_generator=val_generator,
                 epochs=self.train_params["max_epochs_self_supervised"],
                 self_supervised=True,
+                step_offset=step,
             )
-            print("Training predictive model (WITH self-supervised pre-training...)")
-            self.__train(
+        if not self.train_params["run_supervised_training"]:
+            print("Training model with predictive objective self-supervised model...")
+            step = self.__train(
                 train_generator=train_generator,
                 val_generator=val_generator,
                 epochs=self.train_params["max_epochs_supervised"],
                 self_supervised=False,
+                step_offset=step,
             )
 
         if self.tensorboard_writer is not None:

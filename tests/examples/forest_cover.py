@@ -19,7 +19,8 @@ data_params = {
 
 train_params = {
     "batch_size": 8192,
-    "self_supervised_pre_training": False,
+    "run_self_supervised_training": False,
+    "run_supervised_training": False,
     "early_stopping": True,
     "early_stopping_min_delta_pct": 0,
     "early_stopping_patience": 5,
