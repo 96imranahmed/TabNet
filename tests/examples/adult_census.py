@@ -10,28 +10,55 @@ sys.path.append(os.path.abspath("../../src/"))
 from train import TabNet
 
 data_params = {
-    "data_path": "../data/covtype.csv",
-    "target": "Cover_Type",
+    "data_path": "../data/adult_census.csv",
+    "target": "target",
     "random_seed": 42,
-    "model_save_dir": "../../runs/forest_cover/",
-    "model_save_name": "forest_cover",
-    "categorical_variables": [],
+    "model_save_dir": "../../runs/adult_census/",
+    "model_save_name": "adult_census",
+    "columns": [
+        "age",
+        "workclass",
+        "fnlwgt",
+        "education",
+        "education-num",
+        "marital-status",
+        "occupation",
+        "relationship",
+        "race",
+        "sex",
+        "capital-gain",
+        "capital-loss",
+        "hours-per-week",
+        "native-country",
+        "target",
+    ],
+    "categorical_variables": [
+        "workclass",
+        "education",
+        "occupation",
+        "marital-status",
+        "relationship",
+        "race",
+        "sex",
+        "native-country",
+    ],
+    "drop_cols": ["fnlwgt"],
 }
 
 train_params = {
     "batch_size": 8192,
     "run_self_supervised_training": False,
-    "run_supervised_training": False,
+    "run_supervised_training": True,
     "early_stopping": True,
     "early_stopping_min_delta_pct": 0,
-    "early_stopping_patience": 5,
-    "max_epochs_supervised": 5,
-    "max_epochs_self_supervised": 4,
-    "epoch_save_frequency": 5,
+    "early_stopping_patience": 1000,
+    "max_epochs_supervised": 4000,
+    "max_epochs_self_supervised": 4000,
+    "epoch_save_frequency": 150,
     "train_generator_shuffle": True,
     "train_generator_n_workers": 0,
     "epsilon": 1e-7,
-    "learning_rate": 0.01,
+    "learning_rate": 0.02,
     "learning_rate_decay_factor": 0.95,
     "learning_rate_decay_step_rate": 1000,
     "sparsity_regularization": 0.0001,
@@ -39,16 +66,24 @@ train_params = {
 }
 
 model_params = {
-    "discrete_outputs": True,
     "categorical_variables": data_params["categorical_variables"],
+    "n_steps": 5,
+    "feat_transform_fc_dim": 16,
+    "embedding_dim": 3,
+    "discrete_outputs": True,
+    "gamma": 1.5,
 }
 
 if __name__ == "__main__":
-    data = pd.read_csv(data_params["data_path"])
+    data = pd.read_csv(
+        data_params["data_path"], header=None, names=data_params["columns"]
+    )
 
     X, y = (
-        data[data.columns.difference([data_params["target"]])].values,
-        data[data_params["target"]].values,
+        data[
+            data.columns.difference([data_params["target"]] + data_params["drop_cols"])
+        ],
+        data[data_params["target"]],
     )
 
     X_train, X_val, y_train, y_val = train_test_split(
@@ -69,7 +104,6 @@ if __name__ == "__main__":
         },
     )
     save_file = fc_tabnet_model.model_save_path
-    # save_file = "../../runs/forest_cover//1605278053_forest_cover_predictive_model_final.pt"
     fc_tabnet_model = TabNet(save_file=save_file)
 
     fc_xgboost_model = XGBClassifier(n_estimators=1000)

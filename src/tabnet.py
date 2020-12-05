@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 import math
+from collections import OrderedDict
 from sparsemax import Sparsemax
 
 
@@ -15,6 +16,14 @@ class TabNetModel(nn.Module):
 
         if self.params["feat_transform_fc_dim"] % 2 != 0:
             raise ValueError("Fully connected dimension size must be even")
+
+        self.__embedding_layers = nn.ModuleDict()
+        for key, val in sorted(
+            self.params["categorical_config"].items(), key=lambda k: k[1]["idx"]
+        ):
+            self.__embedding_layers[str(val["idx"])] = nn.Embedding(
+                val["n_dims"], self.params["embedding_dim"]
+            )
 
         self.__feature_transformer_shared = SharedFeatureTransformer(**self.params)
         self.__feature_transformer_individual_base = IndividualFeatureTransformer(
@@ -45,12 +54,21 @@ class TabNetModel(nn.Module):
             int(self.params["feat_transform_fc_dim"] / 2), self.params["n_output_dims"]
         )
 
-    def forward(self, X, init_mask):
-        if len(list(X.size())) != 2:
+    def forward(self, X_continuous, X_embedding, init_mask):
+        if len(list(X_continuous.size())) != 2:
             raise ValueError(
                 "Shape mismatch: expected order 2 tensor"
-                ", got order {} tensor".format(len(list(X.size())))
+                ", got order {} tensor".format(len(list(X_continuous.size())))
             )
+        X = torch.cat(
+            [X_continuous]
+            + [
+                self.__embedding_layers[str(key)](val)
+                for key, val in X_embedding.items()
+            ],
+            dim=-1,
+        )
+        X = X.mul(init_mask)  # Mask input data according to the provided mask
         X_bn = nn.BatchNorm1d(self.params["n_input_dims"])(X)
         X_bn_pp = self.__feature_transformer_individual_base(
             self.__feature_transformer_shared(X_bn)
@@ -87,7 +105,7 @@ class TabNetModel(nn.Module):
             torch.stack(step_wise_outputs, dim=0).sum(dim=0, keepdim=False)
         )
 
-        return logits, reconstructions, tuple(step_wise_masks)
+        return X, logits, reconstructions, tuple(step_wise_masks)
 
 
 class SharedFeatureTransformer(nn.Module):
