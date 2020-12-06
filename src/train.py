@@ -3,97 +3,26 @@ import torch
 import os
 import time
 import numpy as np
-from model.tabnet import TabNetModel
+import pandas as pd
+import warnings
+import utils
+from collections import OrderedDict
+from tabnet import TabNetModel
 from torch.utils.tensorboard import SummaryWriter
-
-
-class Dataset(torch.utils.data.Dataset):
-    def __init__(self, X, y, output_mapping=None):
-        self.X = torch.from_numpy(X).float()
-        if output_mapping:
-            self.y = torch.from_numpy(np.vectorize(output_mapping.get)(y)).long()
-        else:
-            self.y = torch.from_numpy(y).float()
-        if len(self.y.size()) == 1:
-            self.y = self.y.unsqueeze(-1)
-        self.n_input_dims = list(self.X.size())[-1]
-        if output_mapping:
-            self.n_output_dims = len(output_mapping.keys())
-        else:
-            self.n_output_dims = list(self.y.size())[-1]
-
-    def __len__(self):
-        return len(self.X)
-
-    def __getitem__(self, index):
-        return self.X[index, ...], self.y[index, ...]
-
-    def random_batch(self, n_samples):
-        random_idx = np.random.randint(0, len(self.X) - 1, size=n_samples)
-        return self.X[random_idx, ...], self.y[random_idx, ...]
-
-
-class EarlyStopping(object):
-    # Implemented from: https://gist.github.com/stefanonardo/693d96ceb2f531fa05db530f3e21517d
-    def __init__(self, mode="min", min_delta=0, patience=10, percentage=False):
-        self.mode = mode
-        self.min_delta = min_delta
-        self.patience = patience
-        self.best = None
-        self.num_bad_epochs = 0
-        self.is_better = None
-        self._init_is_better(mode, min_delta, percentage)
-
-        if patience == 0:
-            self.is_better = lambda a, b: True
-            self.step = lambda a: False
-
-    def step(self, metrics):
-        if self.best is None:
-            self.best = metrics
-            return False
-
-        if torch.isnan(metrics):
-            return True
-
-        if self.is_better(metrics, self.best):
-            self.num_bad_epochs = 0
-            self.best = metrics
-        else:
-            self.num_bad_epochs += 1
-
-        if self.num_bad_epochs >= self.patience:
-            return True
-
-        return False
-
-    def _init_is_better(self, mode, min_delta, percentage):
-        if mode not in {"min", "max"}:
-            raise ValueError("mode " + mode + " is unknown!")
-        if not percentage:
-            if mode == "min":
-                self.is_better = lambda a, best: a < best - min_delta
-            if mode == "max":
-                self.is_better = lambda a, best: a > best + min_delta
-        else:
-            if mode == "min":
-                self.is_better = lambda a, best: a < best - (best * min_delta / 100)
-            if mode == "max":
-                self.is_better = lambda a, best: a > best + (best * min_delta / 100)
 
 
 class TabNet(object):
 
     default_train_params = {
         "batch_size": 8192,
-        "self_supervised_pre_training": False,
+        "run_self_supervised_training": False,
+        "run_supervised_training": True,
         "early_stopping": True,
         "early_stopping_min_delta_pct": 0,
         "early_stopping_patience": 20,
         "max_epochs_supervised": 500,
         "max_epochs_self_supervised": 500,
         "epoch_save_frequency": 100,
-        "use_cuda": True,
         "train_generator_shuffle": True,
         "train_generator_n_workers": 0,
         "epsilon": 1e-7,
@@ -101,7 +30,7 @@ class TabNet(object):
         "learning_rate_decay_factor": 0.95,
         "learning_rate_decay_step_rate": 1000,
         "sparsity_regularization": 0.0001,
-        "p_mask": 0.3,
+        "p_mask": 0.2,
     }
     default_save_params = {
         "model_name": "forest_cover",
@@ -111,17 +40,38 @@ class TabNet(object):
     default_model_params = {
         "n_steps": 5,
         "feat_transform_fc_dim": 128,
+        "categorical_variables": [],
+        "categorical_config": {},
+        "embedding_dim": 2,
         "discrete_outputs": False,
         "gamma": 1.5,
     }
     model_save_path = None
-    discrete_target_mapping = None
+    model = None
 
-    def __init__(self, model_params={}):
-        self.model_params = self.default_model_params
-        self.model_params.update(model_params)
+    def __init__(self, model_params={}, use_cuda=True, save_file=None):
+        self.__configure_device(use_cuda)
 
-    def create_tensorboard_writer(self, test_batch):
+        c_model_save = self.__load_model(save_file)
+        if c_model_save:
+            self.model_params, self.model = c_model_save
+        else:
+            self.model_params = self.default_model_params
+            self.model_params.update(model_params)
+
+    def __get_tensorboard_writer(self, X_test_cont, X_test_cat):
+        """Creates a tensorboard writer object, and pre-populates the model
+        graph on Tensorboard with a test_batch.
+
+        Parameters
+        ----------
+        X_test_cont : a batch of the continuous features to pre-populate the Tensorboard graph
+        X_test_cat : a batch of the categorical features to pre-populate the Tensorboard graph
+
+        Returns
+        -------
+        writer : torch.utils.tensorboard.SummaryWriter object
+        """
         if not os.path.isdir(self.save_params["tensorboard_folder"]):
             os.mkdir(self.save_params["tensorboard_folder"])
 
@@ -134,11 +84,63 @@ class TabNet(object):
         )
         writer.add_graph(
             self.model,
-            [test_batch, torch.ones_like(test_batch)],
+            [
+                X_test_cont,
+                X_test_cat,
+                self.__generate_model_mask(0, batch_size=X_test_cont.size()[0]),
+            ],
         )
         return writer
 
-    def save_model(self, save_identifier=None, self_supervised=False):
+    def __load_model(self, save_file):
+        """Loads model from a local file.
+
+        Parameters
+        ----------
+        save_file : the path to the model save file
+
+        Returns
+        -------
+        model_params : Model parameters
+        model : Model initialized with saved weights
+        """
+        if save_file is None:
+            return
+        if not os.path.isfile(save_file):
+            print(
+                "File {} not found. Run `train` to configure a new model".format(
+                    save_file
+                )
+            )
+            return
+        try:
+            model_params, model_state_dict = torch.load(
+                save_file, map_location=self.device
+            )
+            model = TabNetModel(**model_params)
+            model.load_state_dict(model_state_dict)
+            return model_params, model
+        except:
+            print(
+                "File {} not correctly formatted. Run `train` to configure a new model".format(
+                    save_file
+                )
+            )
+            return
+
+    def __save_model(self, save_identifier=None, self_supervised=False):
+        """Saves current model parameters to a local file.
+
+        Parameters
+        ----------
+        save_identifier : the model identifier to be used in the savefile name
+        self_supervised : flag to identify whether the model has only been
+        trained with self-supervision
+
+        Returns
+        -------
+        None : Model is saved to disk
+        """
         if not os.path.isdir(self.save_params["save_folder"]):
             os.mkdir(self.save_params["save_folder"])
 
@@ -156,23 +158,89 @@ class TabNet(object):
         print("Saving model to: {}".format(self.model_save_path))
         torch.save((self.model_params, self.model.state_dict()), self.model_save_path)
 
-    def generate_discrete_target_map(self, targets):
-        uq_targets = np.unique(targets)
-        return dict(zip(list(uq_targets), list(range(len(uq_targets)))))
+    def __configure_device(self, use_cuda):
+        """Configures torch device, based on configured properties and
+        available devices."""
+        use_cuda_available = torch.cuda.is_available() and use_cuda
+        if use_cuda and use_cuda != use_cuda_available:
+            print("Device configuration: Cuda not available - check GPU configuration.")
+        self.device = torch.device("cuda:0" if use_cuda_available else "cpu")
+        print(
+            "Device configuration: using {} for training/inference".format(self.device)
+        )
+        torch.backends.cudnn.benchmark = True  # Cudnn configuration
 
-    def train_routine(
-        self, train_generator, val_generator=None, epochs=None, self_supervised=False
+    def __generate_model_mask(self, p, batch_size):
+        """Generates a [1,0] mask as input into the model, with the masking
+        probability defined by `p`.
+
+        Note: This function handles categorical encodings, to ensure masks
+        apply to the entire embedding as opposed to just one dimension.
+
+        Parameters
+        ----------
+        p : Masking probability. Setting p to 1 will return all zeros
+        batch_size : Batch_size
+        """
+        mask = torch.bernoulli(
+            torch.ones(batch_size, self.model_params["n_original_input_dims"]) * (1 - p)
+        )
+        idx_slices = set(
+            [
+                self.model_params["categorical_config"][i]["idx"]
+                for i in self.model_params["categorical_config"]
+            ]
+        )
+        mask_keep_idx = []
+        mask_arr = []
+        for c_idx in range(self.model_params["n_original_input_dims"]):
+            if c_idx not in idx_slices:
+                mask_keep_idx.append(c_idx)
+            else:
+                c_mask = (
+                    mask[:, c_idx]
+                    .unsqueeze(-1)
+                    .repeat(1, self.model_params["embedding_dim"])
+                )
+                mask_arr.append(c_mask)
+        return torch.cat([mask[:, mask_keep_idx]] + mask_arr, -1)
+
+    def __train(
+        self,
+        train_generator,
+        val_generator=None,
+        epochs=None,
+        self_supervised=False,
+        step_offset=0,
     ):
+        """Internal function to fit a TabNet model to an input dataset, with a
+        provided number of epochs. Supports early stopping (configured through
+        model training parameters at the top of this file).
+
+        If no validation dataset is provided, no validation metrics will be logged
+        and early stopping functionality will not be available.
+
+        Parameters
+        ----------
+        train_generator : torch.utils.DataLoader generator for the training dataset
+        val_generator : torch.utils.DataLoader generator for the validation dataset
+        epochs : the maximum number of training epochs
+        self_supervised : flag to use a self-supervision training objective, as
+        opposed to a prediction training objective
+        step_offset : the step offset to start logging from
+
+        Returns
+        -------
+        step : The number of steps the model was trained for
+        """
         # Define optimizer
-        scheduler = None
         optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=self.train_params["learning_rate"]
         )
-        if val_generator:
-            lambda_scale = lambda epoch: self.train_params["learning_rate_decay_factor"]
-            scheduler = torch.optim.lr_scheduler.MultiplicativeLR(
-                optimizer, lr_lambda=lambda_scale
-            )
+        lambda_scale = lambda epoch: self.train_params["learning_rate_decay_factor"]
+        scheduler = torch.optim.lr_scheduler.MultiplicativeLR(
+            optimizer, lr_lambda=lambda_scale
+        )
 
         # Define predictive criterion
         criterion = None
@@ -190,39 +258,50 @@ class TabNet(object):
         es_tracker = None
         criterion_val_loss = None
         if self.train_params["early_stopping"]:
-            es_tracker = EarlyStopping(
+            es_tracker = utils.EarlyStopping(
                 min_delta=self.train_params["early_stopping_min_delta_pct"],
                 patience=self.train_params["early_stopping_patience"],
                 percentage=True,
             )
+
+        # Running max
+        model_max_state_dict = None
+        model_max_criteria = torch.tensor(float("NaN"))
+
         # Training
-        step = 0
+        step = step_offset
         for c_epoch in range(epochs):
             loss_avg = []
-            for batch_idx, (x_batch, y_batch) in enumerate(train_generator):
+            for batch_idx, (x_batch_cont, x_batch_cat, y_batch) in enumerate(
+                train_generator
+            ):
                 step += 1
-                x_batch, y_batch = x_batch.to(self.device), y_batch.to(self.device)
+
+                x_batch_cont = x_batch_cont.to(self.device)
+                x_batch_cat = OrderedDict(
+                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
+                )
+                y_batch = y_batch.to(self.device)
 
                 criterion_loss, reconstruction_loss, sparsity_loss = None, None, None
 
-                ones_mask = torch.ones_like(x_batch)
+                ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
                 if self_supervised:
-                    self_supervised_mask = torch.bernoulli(
-                        ones_mask * self.train_params["p_mask"]
+                    self_supervised_mask = self.__generate_model_mask(
+                        self.train_params["p_mask"], x_batch_cont.size()[0]
                     )
 
-                    y_pred_logits, x_reconstruct_batch, masks = self.model(
-                        x_batch.mul(ones_mask - self_supervised_mask),
-                        ones_mask - self_supervised_mask,
+                    x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
+                        x_batch_cont, x_batch_cat, ones_mask - self_supervised_mask
                     )
 
                     # Define reconstruction loss
-                    std = torch.std(x_batch, dim=0)
+                    std = torch.std(x_embedded.data, dim=0)
                     std[
                         std == 0
                     ] = 1  # Correct for cases where std_dev along dimension 0
                     reconstruction_loss = torch.norm(
-                        self_supervised_mask * (x_reconstruct_batch - x_batch) / std
+                        self_supervised_mask * (x_reconstruct_batch - x_embedded) / std
                     ).sum()
                     self.tensorboard_writer.add_scalar(
                         "{}/Reconstruction loss".format(print_stub_name),
@@ -230,8 +309,8 @@ class TabNet(object):
                         step,
                     )
                 else:
-                    y_pred_logits, x_reconstruct_batch, masks = self.model(
-                        x_batch, ones_mask
+                    x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
+                        x_batch_cont, x_batch_cat, ones_mask
                     )
 
                     # Define criterion loss
@@ -288,14 +367,14 @@ class TabNet(object):
                     scheduler.step()
                     print(
                         "Decaying learning rate. Revised learning rate: {}".format(
-                            scheduler.get_last_lr()[0].item()
+                            scheduler.get_last_lr()
                         )
                     )
 
             if (c_epoch > 0) and (
                 c_epoch % self.train_params["epoch_save_frequency"] == 0
             ):
-                self.save_model("epoch_{}".format(c_epoch), self_supervised)
+                self.__save_model("epoch_{}".format(c_epoch), self_supervised)
 
             if val_generator is not None:
                 if self_supervised:
@@ -317,6 +396,21 @@ class TabNet(object):
                             np.round(reconstruction_val_loss.item(), 4),
                         )
                     )
+
+                    if reconstruction_val_loss == torch.min(
+                        reconstruction_val_loss, model_max_criteria
+                    ) or torch.isnan(model_max_criteria):
+                        model_max_state_dict = self.model.state_dict()
+                        model_max_criteria = reconstruction_val_loss
+
+                    if self.train_params["early_stopping"] and es_tracker.step(
+                        reconstruction_val_loss
+                    ):
+                        self.model.load_state_dict(model_max_state_dict)
+                        print(
+                            "Early stopping criterion met - ending training, and using best weights..."
+                        )
+                        break
                 else:
                     y_val_pred, y_val_pred_logits, y_val = self.__validation_predict(
                         val_generator
@@ -355,10 +449,19 @@ class TabNet(object):
                             np.round(metric_value.item(), 4),
                         )
                     )
+                    if criterion_val_loss == torch.min(
+                        criterion_val_loss, model_max_criteria
+                    ) or torch.isnan(model_max_criteria):
+                        model_max_state_dict = self.model.state_dict()
+                        model_max_criteria = criterion_val_loss
+
                     if self.train_params["early_stopping"] and es_tracker.step(
                         criterion_val_loss
                     ):
-                        print("Early stopping criterion met - ending training...")
+                        self.model.load_state_dict(model_max_state_dict)
+                        print(
+                            "Early stopping criterion met - ending training, and using best weights..."
+                        )
                         break
             else:
                 print(
@@ -369,73 +472,188 @@ class TabNet(object):
                         np.round(torch.mean(torch.stack(loss_avg)).item(), 4),
                     )
                 )
-        self.save_model("final", self_supervised)
+        self.__save_model("final", self_supervised)
+        return step
 
     def __validation_reconstruct_loss(self, generator):
-        out_loss = []
-        for batch_idx, (x_batch, y_batch) in enumerate(generator):
-            x_batch, y_batch = x_batch.to(self.device), y_batch.to(self.device)
-            ones_mask = torch.ones_like(x_batch)
-            self_supervised_mask = torch.bernoulli(
-                ones_mask * self.train_params["p_mask"]
-            )
-            y_pred_logits, x_reconstruct_batch, masks = self.model(
-                x_batch.mul(ones_mask - self_supervised_mask),
-                ones_mask - self_supervised_mask,
-            )
-            # Define reconstruction loss
-            std = torch.std(x_batch, dim=0)
-            std[std == 0] = 1  # Correct for cases where std_dev along dimension 0
-            out_loss.append(
-                torch.norm(
-                    self_supervised_mask * (x_reconstruct_batch - x_batch) / std
-                ).sum()
-            )
-        return torch.stack(out_loss).sum()
+        """Returns model reconstruction loss for an input dataset.
+
+        Parameters
+        ----------
+        generator : torch.utils.DataLoader generator for the dataset
+
+        Returns
+        -------
+        loss : Reconstruction loss across the full input dataset
+        """
+        self.model.eval()
+        with torch.no_grad():
+            out_loss = []
+            for batch_idx, (x_batch_cont, x_batch_cat, y_batch) in enumerate(generator):
+                x_batch_cont = x_batch_cont.to(self.device)
+                x_batch_cat = OrderedDict(
+                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
+                )
+                y_batch = y_batch.to(self.device)
+                ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
+                self_supervised_mask = self.__generate_model_mask(
+                    self.train_params["p_mask"], x_batch_cont.size()[0]
+                )
+                x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
+                    x_batch_cont, x_batch_cat, ones_mask - self_supervised_mask
+                )
+
+                # Define reconstruction loss
+                std = torch.std(x_embedded.data, dim=0)
+                std[std == 0] = 1  # Correct for cases where std_dev along dimension 0
+                out_loss.append(
+                    torch.norm(
+                        self_supervised_mask * (x_reconstruct_batch - x_embedded) / std
+                    ).sum()
+                )
+        self.model.train()
+        return torch.stack(out_loss).mean()
 
     def __validation_predict(self, generator):
-        out_y = []
-        out_y_pred_logits = []
-        out_y_pred = []
-        for batch_idx, (x_batch, y_batch) in enumerate(generator):
-            x_batch, y_batch = x_batch.to(self.device), y_batch.to(self.device)
-            ones_mask = torch.ones_like(x_batch)
-            y_val_pred = None
-            y_val_pred_logits, x_val_reconstruct_batch, masks = self.model(
-                x_batch, ones_mask
-            )
-            if self.model_params["discrete_outputs"]:
-                y_val_pred = torch.argmax(
-                    nn.functional.softmax(y_val_pred_logits, dim=-1), dim=-1
+        """Returns prediction probabilities, logits, and targets for an input
+        dataset. Typically used to produce predictions for the validation set.
+
+        Parameters
+        ----------
+        generator : torch.utils.DataLoader generator for the dataset
+
+        Returns
+        -------
+        y_pred_agg : Model predictions probabilities for the input dataset
+        y_pred_logits_agg: Model prediction logits for the input dataset
+        """
+        self.model.eval()
+        with torch.no_grad():
+            out_y = []
+            out_y_pred_logits = []
+            out_y_pred = []
+            for batch_idx, (x_batch_cont, x_batch_cat, y_batch) in enumerate(generator):
+                x_batch_cont = x_batch_cont.to(self.device)
+                x_batch_cat = OrderedDict(
+                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
                 )
-            else:
-                y_val_pred = y_val_pred_logits.squeeze()
-            out_y_pred_logits.append(y_val_pred_logits)
-            out_y_pred.append(y_val_pred)
-            out_y.append(y_batch)
-        y_pred_agg = torch.cat(out_y_pred, dim=0).squeeze()
-        y_pred_logits_agg = torch.cat(out_y_pred_logits, dim=0).squeeze()
-        y_agg = torch.cat(out_y, dim=0).squeeze()
+                y_batch = y_batch.to(self.device)
+                ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
+                x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
+                    x_batch_cont, x_batch_cat, ones_mask
+                )
+                if self.model_params["discrete_outputs"]:
+                    y_val_pred = torch.argmax(
+                        nn.functional.softmax(y_pred_logits, dim=-1), dim=-1
+                    )
+                else:
+                    y_val_pred = y_pred_logits.squeeze()
+                out_y_pred_logits.append(y_pred_logits)
+                out_y_pred.append(y_val_pred)
+                out_y.append(y_batch)
+            y_pred_agg = torch.cat(out_y_pred, dim=0).squeeze()
+            y_pred_logits_agg = torch.cat(out_y_pred_logits, dim=0).squeeze()
+            y_agg = torch.cat(out_y, dim=0).squeeze()
+        self.model.train()
         return (y_pred_agg, y_pred_logits_agg, y_agg)
 
-    def train(
+    def fit(
         self, X_train, y_train, X_val=None, y_val=None, train_params={}, save_params={}
     ):
+        """Prepares and runs full train loop, for a given set of training and
+        saving parameters. If a validation set is not provided, validation
+        metrics will not be provided during training, and early stopping
+        functionality will not be available.
+
+        Parameters
+        ----------
+        X_train : Pandas / Numpy array of training features
+        y_train : Pandas / Numpy array of training targets
+        X_val : (Optional) Pandas / Numpy array of validation features
+        y_val : (Optional) Pandas / Numpy array of validation targets
+        train_params : A dictionary of training parameters
+        save_params: A dictionary of save params
+
+        Returns
+        -------
+        None
+        """
         self.save_params = self.default_save_params
         self.save_params.update(save_params)
 
         self.train_params = self.default_train_params
         self.train_params.update(train_params)
 
-        use_cuda = torch.cuda.is_available() and self.train_params["use_cuda"]
-        self.device = torch.device("cuda:0" if use_cuda else "cpu")
-        torch.backends.cudnn.benchmark = True
+        if self.model is None and self.model_params["discrete_outputs"]:
+            self.model_params[
+                "discrete_target_mapping"
+            ] = utils.generate_categorical_to_ordinal_map(y_train)
 
-        if self.default_model_params["discrete_outputs"]:
-            self.discrete_target_mapping = self.generate_discrete_target_map(y_train)
+        if (type(X_train) is not type(X_val)) or (type(y_train) is not type(y_val)):
+            raise ValueError("Training and validation datasets should have same type")
+
+        data_columns = None
+        if isinstance(X_train, pd.DataFrame):
+            data_columns = dict(zip(X_train.columns, range(X_train.shape[1])))
+        else:
+            data_columns = dict(zip(range(X_train.shape[1]), range(X_train.shape[1])))
+        if (
+            (X_val is not None)
+            and isinstance(X_val, pd.DataFrame)
+            and not (X_val.columns == X_train.columns).all()
+        ):
+            raise ValueError("X_train and X_val have differing columns!")
+        if (
+            (X_val is not None)
+            and isinstance(X_val, np.ndarray)
+            and X_val.shape[1] != X_train.shape[1]
+        ):
+            raise ValueError(
+                "Training and validation datasets have differing number of columns"
+            )
+
+        # Configure categorical variables
+        if len(self.model_params["categorical_variables"]) > 0:
+            config_dict = {}
+            if isinstance(X_train, np.ndarray):
+                # TODO: See below
+                # Check whether categorical_variables is an int
+                # Check whether max/min falls within range of 0, dims - 1
+                pass
+            if isinstance(X_train, pd.DataFrame):
+                # TODO: See below
+                # If string: check whether categorical variables is missing from training dataset
+                # If int: check whether min/max falls within range of 0, dims - 1
+                pass
+
+            for col in self.model_params["categorical_variables"]:
+                cast_map = utils.generate_categorical_to_ordinal_map(X_train[col])
+                config_dict[col] = {
+                    "map": cast_map,
+                    "n_dims": len(cast_map.keys()),
+                    "idx": data_columns[col],
+                    "identifier": col,
+                }
+            self.model_params["categorical_config"] = config_dict
+
+        # Cast DataFrames to numpy arrays
+        if isinstance(X_train, pd.DataFrame):
+            X_train = X_train.values
+        if isinstance(y_train, pd.DataFrame):
+            y_train = y_train.values
+        if isinstance(X_val, pd.DataFrame):
+            X_val = X_val.values
+        if isinstance(y_val, pd.DataFrame):
+            y_val = y_val.values
 
         # Build generators for train / validation
-        train_data = Dataset(X_train, y_train, self.discrete_target_mapping)
+        train_data = utils.TrainingDataset(
+            X_train,
+            y_train,
+            self.model_params["discrete_target_mapping"],
+            self.model_params["categorical_config"],
+            columns=data_columns,
+        )
         train_generator = torch.utils.data.DataLoader(
             train_data,
             **{
@@ -444,55 +662,165 @@ class TabNet(object):
                 "num_workers": self.train_params["train_generator_n_workers"],
             }
         )
-
         val_data = None
         val_generator = None
         if X_val is not None:
-            val_data = Dataset(X_val, y_val, self.discrete_target_mapping)
+            val_data = utils.TrainingDataset(
+                X_val,
+                y_val,
+                output_mapping=self.model_params["discrete_target_mapping"],
+                categorical_mapping=self.model_params["categorical_config"],
+                columns=data_columns,
+            )
             val_generator = torch.utils.data.DataLoader(
                 val_data,
                 **{"batch_size": self.train_params["batch_size"], "shuffle": False}
             )
 
+        # Adjust train_data input dims based on categorical embeddings
+        n_input_dims = X_train.shape[1] + (
+            len(self.model_params["categorical_config"])
+            * (self.model_params["embedding_dim"] - 1)
+        )
+        n_continuous_dims = X_train.shape[1] - len(
+            self.model_params["categorical_config"]
+        )
+
         # Update with correct dimensions
-        self.model_params.update(
-            {
-                "n_input_dims": train_data.n_input_dims,
-                "n_output_dims": train_data.n_output_dims,
-            }
-        )
-
-        self.model = TabNetModel(**self.model_params)
-
-        self.tensorboard_writer = self.create_tensorboard_writer(
-            train_data.random_batch(self.train_params["batch_size"])[0]
-        )
-
-        if not self.train_params["self_supervised_pre_training"]:
-            print("Training predictive model (WITHOUT self-supervised pre-training...)")
-            self.train_routine(
-                train_generator,
-                val_generator,
-                self.train_params["max_epochs_supervised"],
-                False,
+        if self.model is None:
+            self.model_params.update(
+                {
+                    "n_input_dims": n_input_dims,
+                    "n_original_input_dims": X_train.shape[1],
+                    "n_continuous_input_dims": n_continuous_dims,
+                    "n_output_dims": train_data.n_output_dims,
+                    "column_index_map": data_columns,
+                }
             )
-        else:
-            print("Training self-supervised model...")
-            self.train_routine(
-                train_generator,
-                val_generator,
-                self.train_params["max_epochs_self_supervised"],
-                True,
+            self.model = TabNetModel(**self.model_params)
+
+        X_test_batch_cont, X_test_batch_cat, _ = train_data.random_batch(
+            self.train_params["batch_size"]
+        )
+        self.tensorboard_writer = self.__get_tensorboard_writer(
+            X_test_batch_cont, X_test_batch_cat
+        )
+        self.model.train()  # Enable training mode
+
+        if (
+            self.train_params["run_self_supervised_training"] == False
+            and self.train_params["run_supervised_training"] == False
+        ):
+            raise ValueError(
+                "No training scheme defined: set `run_self_supervised_training` or `run_supervised_training` to True"
             )
-            print("Training predictive model (WITH self-supervised pre-training...)")
-            self.train_routine(
-                train_generator,
-                val_generator,
-                self.train_params["max_epochs_supervised"],
-                False,
+
+        step = 0
+        if self.train_params["run_self_supervised_training"]:
+            print("Training model with self-supervision objective")
+            step = self.__train(
+                train_generator=train_generator,
+                val_generator=val_generator,
+                epochs=self.train_params["max_epochs_self_supervised"],
+                self_supervised=True,
+                step_offset=step,
+            )
+        if self.train_params["run_supervised_training"]:
+            print("Training model with predictive objective self-supervised model...")
+            step = self.__train(
+                train_generator=train_generator,
+                val_generator=val_generator,
+                epochs=self.train_params["max_epochs_supervised"],
+                self_supervised=False,
+                step_offset=step,
             )
 
         if self.tensorboard_writer is not None:
             self.tensorboard_writer.flush()
-        if self.tensorboard_writer is not None:
             self.tensorboard_writer.close()
+
+    def __predict(self, X, batch_size=1024):
+        """Internal method to produce predictions for provided input and
+        batch_size features."""
+        if not self.model:
+            raise ValueError(
+                "Model not yet initialized. Run `train` to fit a model to an input dataset"
+            )
+
+        self.model.eval()
+        with torch.no_grad():
+            pred_data = utils.InferenceDataset(X)
+            pred_generator = torch.utils.data.DataLoader(
+                pred_data, **{"batch_size": batch_size, "shuffle": False}
+            )
+
+            out_y_pred = []
+            for batch_idx, (x_batch_cont, x_batch_cat, y_batch) in enumerate(
+                pred_generator
+            ):
+                x_batch_cont = x_batch_cont.to(self.device)
+                x_batch_cat = OrderedDict(
+                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
+                )
+                y_batch = y_batch.to(self.device)
+                ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
+                y_val_pred = None
+                x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
+                    x_batch_cont, x_batch_cat, ones_mask - self_supervised_mask
+                )
+                if self.model_params["discrete_outputs"]:
+                    y_val_pred = nn.functional.softmax(y_pred_logits, dim=-1)
+                else:
+                    y_val_pred = y_pred_logits.squeeze()
+                out_y_pred.append(y_val_pred)
+            y_pred_agg = torch.cat(out_y_pred, dim=0).squeeze()
+        return y_pred_agg
+
+    def predict_proba(self, X, batch_size=1024):
+        """Uses model to predict for a given set of input features.
+
+        Returns probability distribution for classification tasks.
+        Raises ValueError if `discrete_outputs` is set to False.
+
+        Parameters
+        ----------
+        X : Numpy array of features to predict on
+
+        Returns
+        -------
+        y : Pandas array of predictions for input features, with column
+        names corresponding to associated class names
+
+        Raises
+        ------
+        ValueError: If model is not yet trained, or model is not a Classifier
+        """
+        if not self.model_params["discrete_outputs"]:
+            raise ValueError("`Predict_proba` not available for regression models")
+        else:
+            ret_data = pd.DataFrame(self.__predict(X, batch_size=batch_size).numpy())
+            ret_data.columns = utils.map_ordinal_to_categorical(
+                np.array(ret_data.columns), self.model_params["discrete_target_mapping"]
+            )
+            return ret_data
+
+    def predict(self, X, batch_size=1024):
+        """Uses model to predict for a given set of input features.
+
+        Returns probability distribution for classification tasks.
+
+        Parameters
+        ----------
+        X : Numpy array of features to predict on
+
+        Returns
+        -------
+        y : List of predictions for input features
+        """
+        if self.model_params["discrete_outputs"]:
+            return utils.map_ordinal_to_categorical(
+                torch.argmax(self.__predict(X, batch_size=batch_size), dim=-1),
+                self.model_params["discrete_target_mapping"],
+            )
+        else:
+            return self.__predict(X, batch_size=batch_size).numpy()

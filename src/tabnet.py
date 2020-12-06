@@ -1,10 +1,12 @@
 import torch.nn as nn
 import torch
 import math
+from collections import OrderedDict
 from sparsemax import Sparsemax
 
 
 class TabNetModel(nn.Module):
+    """Module for TabNet architecture."""
 
     params = {}
 
@@ -15,23 +17,31 @@ class TabNetModel(nn.Module):
         if self.params["feat_transform_fc_dim"] % 2 != 0:
             raise ValueError("Fully connected dimension size must be even")
 
-        self.feature_transformer_shared = SharedFeatureTransformer(**self.params)
-        self.feature_transformer_individual_base = IndividualFeatureTransformer(
+        self.__embedding_layers = nn.ModuleDict()
+        for key, val in sorted(
+            self.params["categorical_config"].items(), key=lambda k: k[1]["idx"]
+        ):
+            self.__embedding_layers[str(val["idx"])] = nn.Embedding(
+                val["n_dims"], self.params["embedding_dim"]
+            )
+
+        self.__feature_transformer_shared = SharedFeatureTransformer(**self.params)
+        self.__feature_transformer_individual_base = IndividualFeatureTransformer(
             -1, **self.params
         )
-        self.feature_transformer_individual = nn.ModuleList(
+        self.__feature_transformer_individual = nn.ModuleList(
             [
                 IndividualFeatureTransformer(i, **self.params)
                 for i in range(self.params["n_steps"])
             ]
         )
-        self.attentive_transformer = nn.ModuleList(
+        self.__attentive_transformer = nn.ModuleList(
             [
                 AttentiveTransformer(i, **self.params)
                 for i in range(self.params["n_steps"])
             ]
         )
-        self.reconstruction_fc = nn.ModuleList(
+        self.__reconstruction_fc = nn.ModuleList(
             [
                 nn.Linear(
                     int(self.params["feat_transform_fc_dim"] / 2),
@@ -40,19 +50,28 @@ class TabNetModel(nn.Module):
                 for i in range(self.params["n_steps"])
             ]
         )
-        self.output_fc = nn.Linear(
+        self.__output_fc = nn.Linear(
             int(self.params["feat_transform_fc_dim"] / 2), self.params["n_output_dims"]
         )
 
-    def forward(self, X, init_mask):
-        if len(list(X.size())) != 2:
+    def forward(self, X_continuous, X_embedding, init_mask):
+        if len(list(X_continuous.size())) != 2:
             raise ValueError(
                 "Shape mismatch: expected order 2 tensor"
-                ", got order {} tensor".format(len(list(X.size())))
+                ", got order {} tensor".format(len(list(X_continuous.size())))
             )
+        X = torch.cat(
+            [X_continuous]
+            + [
+                self.__embedding_layers[str(key)](val)
+                for key, val in X_embedding.items()
+            ],
+            dim=-1,
+        )
+        X = X.mul(init_mask)  # Mask input data according to the provided mask
         X_bn = nn.BatchNorm1d(self.params["n_input_dims"])(X)
-        X_bn_pp = self.feature_transformer_individual_base(
-            self.feature_transformer_shared(X_bn)
+        X_bn_pp = self.__feature_transformer_individual_base(
+            self.__feature_transformer_shared(X_bn)
         )
 
         feat_prev = X_bn_pp
@@ -66,27 +85,29 @@ class TabNetModel(nn.Module):
         step_wise_masks = []
 
         for i in range(self.params["n_steps"]):
-            mask = self.attentive_transformer[i](feat_prev, p_prev)
+            mask = self.__attentive_transformer[i](feat_prev, p_prev)
             X_i_in = torch.mul(mask, X_bn)
-            feat_prev = self.feature_transformer_individual[i](
-                self.feature_transformer_shared(X_i_in)
+            feat_prev = self.__feature_transformer_individual[i](
+                self.__feature_transformer_shared(X_i_in)
             )
-            p_prev = torch.mul(p_prev, gamma - mask)
+            p_prev = torch.mul(
+                p_prev, gamma - mask
+            ).data  # Prevent gradient calculation on p_prev
             step_wise_masks.append(mask)
             step_wise_outputs.append(nn.functional.relu(feat_prev))
             step_wise_feature_reconstruction.append(
-                self.reconstruction_fc[i](feat_prev)
+                self.__reconstruction_fc[i](feat_prev)
             )
 
         reconstructions = torch.stack(step_wise_feature_reconstruction, dim=0).sum(
             dim=0, keepdim=False
         )
 
-        logits = self.output_fc(
+        logits = self.__output_fc(
             torch.stack(step_wise_outputs, dim=0).sum(dim=0, keepdim=False)
         )
 
-        return logits, reconstructions, tuple(step_wise_masks)
+        return X, logits, reconstructions, tuple(step_wise_masks)
 
 
 class SharedFeatureTransformer(nn.Module):
