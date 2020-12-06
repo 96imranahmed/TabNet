@@ -47,29 +47,29 @@ data_params = {
 
 train_params = {
     "batch_size": 8192,
-    "run_self_supervised_training": False,
+    "run_self_supervised_training": True,
     "run_supervised_training": True,
     "early_stopping": True,
     "early_stopping_min_delta_pct": 0,
-    "early_stopping_patience": 1000,
+    "early_stopping_patience": 100,
     "max_epochs_supervised": 4000,
-    "max_epochs_self_supervised": 4000,
-    "epoch_save_frequency": 150,
+    "max_epochs_self_supervised": 2000,
+    "epoch_save_frequency": 500,
     "train_generator_shuffle": True,
     "train_generator_n_workers": 0,
     "epsilon": 1e-7,
     "learning_rate": 0.02,
-    "learning_rate_decay_factor": 0.95,
-    "learning_rate_decay_step_rate": 1000,
+    "learning_rate_decay_factor": 0.5,
+    "learning_rate_decay_step_rate": 2000,
     "sparsity_regularization": 0.0001,
-    "p_mask": 0.8,
+    "p_mask": 0.7,
 }
 
 model_params = {
     "categorical_variables": data_params["categorical_variables"],
     "n_steps": 5,
-    "feat_transform_fc_dim": 16,
-    "embedding_dim": 3,
+    "feat_transform_fc_dim": 32,
+    "embedding_dim": 1,
     "discrete_outputs": True,
     "gamma": 1.5,
 }

@@ -90,7 +90,9 @@ class TabNetModel(nn.Module):
             feat_prev = self.__feature_transformer_individual[i](
                 self.__feature_transformer_shared(X_i_in)
             )
-            p_prev = torch.mul(p_prev, gamma - mask)
+            p_prev = torch.mul(
+                p_prev, gamma - mask
+            ).data  # Prevent gradient calculation on p_prev
             step_wise_masks.append(mask)
             step_wise_outputs.append(nn.functional.relu(feat_prev))
             step_wise_feature_reconstruction.append(

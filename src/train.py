@@ -263,6 +263,11 @@ class TabNet(object):
                 patience=self.train_params["early_stopping_patience"],
                 percentage=True,
             )
+
+        # Running max
+        model_max_state_dict = None
+        model_max_criteria = torch.tensor(float("NaN"))
+
         # Training
         step = step_offset
         for c_epoch in range(epochs):
@@ -362,7 +367,7 @@ class TabNet(object):
                     scheduler.step()
                     print(
                         "Decaying learning rate. Revised learning rate: {}".format(
-                            scheduler.get_last_lr()[0].item()
+                            scheduler.get_last_lr()
                         )
                     )
 
@@ -391,6 +396,21 @@ class TabNet(object):
                             np.round(reconstruction_val_loss.item(), 4),
                         )
                     )
+
+                    if reconstruction_val_loss == torch.min(
+                        reconstruction_val_loss, model_max_criteria
+                    ) or torch.isnan(model_max_criteria):
+                        model_max_state_dict = self.model.state_dict()
+                        model_max_criteria = reconstruction_val_loss
+
+                    if self.train_params["early_stopping"] and es_tracker.step(
+                        reconstruction_val_loss
+                    ):
+                        self.model.load_state_dict(model_max_state_dict)
+                        print(
+                            "Early stopping criterion met - ending training, and using best weights..."
+                        )
+                        break
                 else:
                     y_val_pred, y_val_pred_logits, y_val = self.__validation_predict(
                         val_generator
@@ -429,10 +449,19 @@ class TabNet(object):
                             np.round(metric_value.item(), 4),
                         )
                     )
+                    if criterion_val_loss == torch.min(
+                        criterion_val_loss, model_max_criteria
+                    ) or torch.isnan(model_max_criteria):
+                        model_max_state_dict = self.model.state_dict()
+                        model_max_criteria = criterion_val_loss
+
                     if self.train_params["early_stopping"] and es_tracker.step(
                         criterion_val_loss
                     ):
-                        print("Early stopping criterion met - ending training...")
+                        self.model.load_state_dict(model_max_state_dict)
+                        print(
+                            "Early stopping criterion met - ending training, and using best weights..."
+                        )
                         break
             else:
                 print(
