@@ -29,6 +29,7 @@ class TabNet(object):
         "learning_rate": 0.01,
         "learning_rate_decay_factor": 0.95,
         "learning_rate_decay_step_rate": 1000,
+        "weight_decay": 0.001,
         "sparsity_regularization": 0.0001,
         "p_mask": 0.2,
     }
@@ -39,7 +40,10 @@ class TabNet(object):
     }
     default_model_params = {
         "n_steps": 5,
-        "feat_transform_fc_dim": 128,
+        "n_dims_d": 16,
+        "n_dims_a": 16,
+        "batch_norm_momentum": 0.85,
+        "dropout_p": 0.3,
         "categorical_variables": [],
         "categorical_config": {},
         "embedding_dim": 2,
@@ -205,6 +209,14 @@ class TabNet(object):
                 mask_arr.append(c_mask)
         return torch.cat([mask[:, mask_keep_idx]] + mask_arr, -1)
 
+    def __get_reconstruction_loss(self, x, x_reconstruction, feature_mask):
+        """Compute reconstruction loss as per guidance in paper"""
+        std = torch.std(x.data, dim=0)
+        std[std == 0] = 1  # Correct for cases where std_dev along dimension = 0
+        return torch.norm(
+            (torch.ones_like(x) - feature_mask) * (x_reconstruction - x) / std
+        ).sum()
+
     def __train(
         self,
         train_generator,
@@ -234,8 +246,10 @@ class TabNet(object):
         step : The number of steps the model was trained for
         """
         # Define optimizer
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=self.train_params["learning_rate"]
+        optimizer = torch.optim.Adam(
+            self.model.parameters(),
+            lr=self.train_params["learning_rate"],
+            weight_decay=self.train_params["weight_decay"],
         )
         lambda_scale = lambda epoch: self.train_params["learning_rate_decay_factor"]
         scheduler = torch.optim.lr_scheduler.MultiplicativeLR(
@@ -283,7 +297,12 @@ class TabNet(object):
                 )
                 y_batch = y_batch.to(self.device)
 
-                criterion_loss, reconstruction_loss, sparsity_loss = None, None, None
+                criterion_loss, reconstruction_loss, sparsity_loss, masks = (
+                    None,
+                    None,
+                    None,
+                    None,
+                )
 
                 ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
                 if self_supervised:
@@ -292,37 +311,22 @@ class TabNet(object):
                     )
 
                     x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
-                        x_batch_cont, x_batch_cat, ones_mask - self_supervised_mask
+                        x_batch_cont, x_batch_cat, self_supervised_mask, mask_input=True
                     )
 
-                    # Define reconstruction loss
-                    std = torch.std(x_embedded.data, dim=0)
-                    std[
-                        std == 0
-                    ] = 1  # Correct for cases where std_dev along dimension 0
-                    reconstruction_loss = torch.norm(
-                        self_supervised_mask * (x_reconstruct_batch - x_embedded) / std
-                    ).sum()
-                    self.tensorboard_writer.add_scalar(
-                        "{}/Reconstruction loss".format(print_stub_name),
-                        reconstruction_loss,
-                        step,
+                    reconstruction_loss = self.__get_reconstruction_loss(
+                        x_embedded, x_reconstruct_batch, self_supervised_mask
                     )
+
                 else:
                     x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
-                        x_batch_cont, x_batch_cat, ones_mask
+                        x_batch_cont, x_batch_cat, ones_mask, mask_input=False
                     )
 
                     # Define criterion loss
-                    y_batch_criterion = y_batch
                     if self.model_params["discrete_outputs"]:
-                        y_batch_criterion = torch.squeeze(y_batch_criterion)
-                    criterion_loss = criterion(y_pred_logits, y_batch_criterion)
-                    self.tensorboard_writer.add_scalar(
-                        "{}/Criterion loss".format(print_stub_name),
-                        criterion_loss,
-                        step,
-                    )
+                        y_batch = torch.squeeze(y_batch)
+                    criterion_loss = criterion(y_pred_logits, y_batch)
 
                 # Define sparsity loss
                 sparsity_loss = (
@@ -338,6 +342,18 @@ class TabNet(object):
                         ]
                     ).sum()
                 )
+                if reconstruction_loss:
+                    self.tensorboard_writer.add_scalar(
+                        "{}/Reconstruction loss".format(print_stub_name),
+                        reconstruction_loss,
+                        step,
+                    )
+                if criterion_loss:
+                    self.tensorboard_writer.add_scalar(
+                        "{}/Criterion loss".format(print_stub_name),
+                        criterion_loss,
+                        step,
+                    )
                 self.tensorboard_writer.add_scalar(
                     "{}/Sparsity loss".format(print_stub_name),
                     sparsity_loss,
@@ -500,17 +516,15 @@ class TabNet(object):
                     self.train_params["p_mask"], x_batch_cont.size()[0]
                 )
                 x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
-                    x_batch_cont, x_batch_cat, ones_mask - self_supervised_mask
+                    x_batch_cont, x_batch_cat, self_supervised_mask, mask_input=True
                 )
 
-                # Define reconstruction loss
-                std = torch.std(x_embedded.data, dim=0)
-                std[std == 0] = 1  # Correct for cases where std_dev along dimension 0
                 out_loss.append(
-                    torch.norm(
-                        self_supervised_mask * (x_reconstruct_batch - x_embedded) / std
-                    ).sum()
+                    self.__get_reconstruction_loss(
+                        x_embedded, x_reconstruct_batch, self_supervised_mask
+                    )
                 )
+
         self.model.train()
         return torch.stack(out_loss).mean()
 
@@ -674,7 +688,10 @@ class TabNet(object):
             )
             val_generator = torch.utils.data.DataLoader(
                 val_data,
-                **{"batch_size": self.train_params["batch_size"], "shuffle": False}
+                **{
+                    "batch_size": self.train_params["validation_batch_size"],
+                    "shuffle": False,
+                }
             )
 
         # Adjust train_data input dims based on categorical embeddings

@@ -46,30 +46,35 @@ data_params = {
 }
 
 train_params = {
-    "batch_size": 8192,
-    "run_self_supervised_training": True,
+    "batch_size": 4096,
+    "run_self_supervised_training": False,
     "run_supervised_training": True,
     "early_stopping": True,
     "early_stopping_min_delta_pct": 0,
-    "early_stopping_patience": 100,
+    "early_stopping_patience": 2000,
     "max_epochs_supervised": 4000,
-    "max_epochs_self_supervised": 2000,
+    "max_epochs_self_supervised": 1500,
     "epoch_save_frequency": 500,
     "train_generator_shuffle": True,
     "train_generator_n_workers": 0,
     "epsilon": 1e-7,
     "learning_rate": 0.02,
-    "learning_rate_decay_factor": 0.5,
-    "learning_rate_decay_step_rate": 2000,
+    "learning_rate_decay_factor": 0.4,
+    "learning_rate_decay_step_rate": 2500,
+    "weight_decay": 0.001,
     "sparsity_regularization": 0.0001,
-    "p_mask": 0.7,
+    "p_mask": 0.2,
+    "validation_batch_size": 128,
 }
 
 model_params = {
     "categorical_variables": data_params["categorical_variables"],
     "n_steps": 5,
-    "feat_transform_fc_dim": 32,
-    "embedding_dim": 1,
+    "n_dims_d": 16,
+    "n_dims_a": 16,
+    "batch_norm_momentum": 0.98,
+    "dropout_p": 0.3,
+    "embedding_dim": 2,
     "discrete_outputs": True,
     "gamma": 1.5,
 }
@@ -105,15 +110,3 @@ if __name__ == "__main__":
     )
     save_file = fc_tabnet_model.model_save_path
     fc_tabnet_model = TabNet(save_file=save_file)
-
-    fc_xgboost_model = XGBClassifier(n_estimators=1000)
-    fc_xgboost_model.fit(
-        X_train, y_train, eval_set=[(X_val, y_val)], early_stopping_rounds=20
-    )
-
-    y_tabnet_val_pred = fc_tabnet_model.predict(X_val)
-    print(
-        "TabNet accuracy: {}".format(
-            np.round((y_tabnet_val_pred == y_val).sum() / len(y_val), 3)
-        )
-    )
