@@ -726,7 +726,7 @@ class TabNet(object):
                 step_offset=step,
             )
         if self.train_params["run_supervised_training"]:
-            print("Training model with predictive objective self-supervised model...")
+            print("Training model with predictive objective...")
             step = self.__train(
                 train_generator=train_generator,
                 val_generator=val_generator,
