@@ -286,7 +286,7 @@ class TabNet(object):
 
         # Running max
         model_max_state_dict = None
-        model_max_criteria = torch.tensor(float("NaN"))
+        model_max_criteria = torch.tensor(float("NaN")).to(self.device)
 
         # Training
         step = step_offset
@@ -717,7 +717,7 @@ class TabNet(object):
             X_test_batch_cont, X_test_batch_cat
         )
         self.model.train()  # Enable training mode
-        print("Staring training...")
+        print("Starting training...")
 
         if (
             self.train_params["run_self_supervised_training"] == False
