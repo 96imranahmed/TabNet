@@ -18,7 +18,15 @@ class TrainingDataset(torch.utils.data.Dataset):
 
     is_categorical = False
 
-    def __init__(self, X, y, output_mapping, categorical_mapping, columns, device=None):
+    def __init__(
+        self,
+        X,
+        y,
+        output_mapping=None,
+        categorical_mapping=None,
+        columns=None,
+        device=None,
+    ):
         """Dataset initialization function.
 
         Parameters
@@ -28,6 +36,7 @@ class TrainingDataset(torch.utils.data.Dataset):
         output_mapping : a mapping of categorical targets to ordinals
         categorical_mapping: mapping data to encode categorical variables
         columns: dataset columns identifiers
+        device: Tensor processing device in-use by PyTorch
         """
         self.columns = columns
         self.device = device
@@ -67,7 +76,7 @@ class TrainingDataset(torch.utils.data.Dataset):
             OrderedDict(
                 {key: self.X[1][key][index, ...].to(self.device) for key in self.X[1]}
             ),
-            self.y[index, ...],
+            self.y[index, ...].to(self.device),
         )
 
     def random_batch(self, n_samples):
@@ -87,6 +96,7 @@ class InferenceDataset(torch.utils.data.Dataset):
         X : Numpy array of input features
         categorical_mapping: mapping data to encode categorical variables
         columns: dataset columns identifiers
+        device: Tensor processing device in-use by PyTorch
         """
         self.columns = columns
         self.device = device
