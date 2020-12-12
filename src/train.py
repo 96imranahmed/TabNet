@@ -213,9 +213,7 @@ class TabNet(object):
                     .repeat(1, self.model_params["embedding_dim"])
                 )
                 mask_arr.append(c_mask)
-        out_mask = torch.cat([mask[:, mask_keep_idx]] + mask_arr, -1)
-        out_mask.to(self.device)
-        return out_mask
+        return torch.cat([mask[:, mask_keep_idx]] + mask_arr, -1).to(self.device)
 
     def __get_reconstruction_loss(self, x, x_reconstruction, feature_mask):
         """Compute reconstruction loss as per guidance in paper"""
@@ -298,12 +296,6 @@ class TabNet(object):
                 train_generator
             ):
                 step += 1
-
-                x_batch_cont = x_batch_cont.to(self.device)
-                x_batch_cat = OrderedDict(
-                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
-                )
-                y_batch = y_batch.to(self.device)
 
                 criterion_loss, reconstruction_loss, sparsity_loss, masks = (
                     None,
@@ -514,11 +506,6 @@ class TabNet(object):
         with torch.no_grad():
             out_loss = []
             for batch_idx, (x_batch_cont, x_batch_cat, y_batch) in enumerate(generator):
-                x_batch_cont = x_batch_cont.to(self.device)
-                x_batch_cat = OrderedDict(
-                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
-                )
-                y_batch = y_batch.to(self.device)
                 ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
                 self_supervised_mask = self.__generate_model_mask(
                     self.train_params["p_mask"], x_batch_cont.size()[0]
@@ -555,11 +542,6 @@ class TabNet(object):
             out_y_pred_logits = []
             out_y_pred = []
             for batch_idx, (x_batch_cont, x_batch_cat, y_batch) in enumerate(generator):
-                x_batch_cont = x_batch_cont.to(self.device)
-                x_batch_cat = OrderedDict(
-                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
-                )
-                y_batch = y_batch.to(self.device)
                 ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
                 x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
                     x_batch_cont, x_batch_cat, ones_mask
@@ -675,6 +657,7 @@ class TabNet(object):
             self.model_params["discrete_target_mapping"],
             self.model_params["categorical_config"],
             columns=data_columns,
+            device=self.device,
         )
         train_generator = torch.utils.data.DataLoader(
             train_data,
@@ -693,6 +676,7 @@ class TabNet(object):
                 output_mapping=self.model_params["discrete_target_mapping"],
                 categorical_mapping=self.model_params["categorical_config"],
                 columns=data_columns,
+                device=self.device,
             )
             val_generator = torch.utils.data.DataLoader(
                 val_data,
@@ -785,6 +769,7 @@ class TabNet(object):
             X,
             self.model_params["categorical_config"],
             columns=data_columns,
+            device=self.device,
         )
         with torch.no_grad():
 
@@ -794,10 +779,6 @@ class TabNet(object):
 
             out_y_pred = []
             for batch_idx, (x_batch_cont, x_batch_cat) in enumerate(pred_generator):
-                x_batch_cont = x_batch_cont.to(self.device)
-                x_batch_cat = OrderedDict(
-                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
-                )
                 ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
                 y_val_pred = None
                 x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(

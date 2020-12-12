@@ -18,7 +18,7 @@ class TrainingDataset(torch.utils.data.Dataset):
 
     is_categorical = False
 
-    def __init__(self, X, y, output_mapping, categorical_mapping, columns):
+    def __init__(self, X, y, output_mapping, categorical_mapping, columns, device=None):
         """Dataset initialization function.
 
         Parameters
@@ -30,7 +30,7 @@ class TrainingDataset(torch.utils.data.Dataset):
         columns: dataset columns identifiers
         """
         self.columns = columns
-
+        self.device = device
         # Preprocess categoricals
         if categorical_mapping:
             X_slices = OrderedDict()
@@ -63,8 +63,10 @@ class TrainingDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         return (
-            self.X[0][index, ...],
-            OrderedDict({key: self.X[1][key][index, ...] for key in self.X[1]}),
+            self.X[0][index, ...].to(self.device),
+            OrderedDict(
+                {key: self.X[1][key][index, ...].to(self.device) for key in self.X[1]}
+            ),
             self.y[index, ...],
         )
 
@@ -77,7 +79,7 @@ class TrainingDataset(torch.utils.data.Dataset):
 class InferenceDataset(torch.utils.data.Dataset):
     """Creates a PyTorch Dataset object for a set of points for inference."""
 
-    def __init__(self, X, categorical_mapping=None, columns=None):
+    def __init__(self, X, categorical_mapping=None, columns=None, device=None):
         """Dataset initialization function.
 
         Parameters
@@ -87,6 +89,7 @@ class InferenceDataset(torch.utils.data.Dataset):
         columns: dataset columns identifiers
         """
         self.columns = columns
+        self.device = device
 
         # Preprocess categoricals
         if categorical_mapping:
@@ -110,8 +113,10 @@ class InferenceDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         return (
-            self.X[0][index, ...],
-            OrderedDict({key: self.X[1][key][index, ...] for key in self.X[1]}),
+            self.X[0][index, ...].to(self.device),
+            OrderedDict(
+                {key: self.X[1][key][index, ...].to(self.device) for key in self.X[1]}
+            ),
         )
 
 
