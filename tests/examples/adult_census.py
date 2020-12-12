@@ -115,7 +115,7 @@ if __name__ == "__main__":
 
     # XGBoost training
     print("############# Training XGBoost model")
-    ac_xgboost_model = XGBClassifier(n_estimators=100, verbosity=1).fit(
+    ac_xgboost_model = XGBClassifier(n_estimators=250, verbosity=1).fit(
         X_train_copy,
         y_train_copy,
         eval_set=[(X_val_copy, y_val_copy)],

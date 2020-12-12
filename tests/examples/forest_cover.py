@@ -22,7 +22,7 @@ data_params = {
 train_params = {
     "batch_size": 8192,
     "run_self_supervised_training": False,
-    "run_supervised_training": False,
+    "run_supervised_training": True,
     "early_stopping": True,
     "early_stopping_min_delta_pct": 0,
     "early_stopping_patience": 5,
@@ -53,7 +53,7 @@ if __name__ == "__main__":
     )
 
     X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.33, random_state=data_params["random_seed"]
+        X, y, test_size=0.2, random_state=data_params["random_seed"]
     )
 
     y_train_copy, y_val_copy = (
@@ -66,7 +66,7 @@ if __name__ == "__main__":
 
     # XGBoost training
     print("############# Training XGBoost model")
-    fc_xgboost_model = XGBClassifier(n_estimators=200, verbosity=1)
+    fc_xgboost_model = XGBClassifier(n_estimators=250, verbosity=1)
     fc_xgboost_model.fit(
         X_train,
         y_train_copy,
@@ -74,6 +74,12 @@ if __name__ == "__main__":
         early_stopping_rounds=20,
     )
     y_val_predict_xgb = fc_xgboost_model.predict(X_val)
+
+    print(
+        "XGBoost accuracy: {}".format(
+            np.round((y_val_predict_xgb == y_val_copy).sum() / len(y_val_copy), 3)
+        )
+    )
 
     # TabNet training
     print("############# Training TabNet model")
@@ -91,11 +97,11 @@ if __name__ == "__main__":
         },
     )
     fc_tabnet_model = TabNet(save_file=save_file)
+    y_val_predict_tabnet = fc_tabnet_model.predict(X_val)
 
-    y_tabnet_val_pred = fc_tabnet_model.predict(X_val)
     print(
         "TabNet accuracy: {}".format(
-            np.round((y_tabnet_val_pred == y_val).sum() / len(y_val), 3)
+            np.round((y_val_predict_tabnet == y_val).sum() / len(y_val), 3)
         )
     )
     print(

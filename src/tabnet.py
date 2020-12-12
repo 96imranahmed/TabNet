@@ -62,6 +62,7 @@ class TabNetModel(nn.Module):
             + [
                 self.__embedding_layers[str(key)](val)
                 for key, val in X_embedding.items()
+                if key != -1
             ],
             dim=-1,
         )

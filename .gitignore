@@ -1,6 +1,5 @@
 # vscode 
 .vscode
-/tests/data/
 
 # tensorboard runs
 runs/

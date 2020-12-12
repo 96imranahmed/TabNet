@@ -15,6 +15,7 @@ class TabNet(object):
 
     default_train_params = {
         "batch_size": 8192,
+        "validation_batch_size": 1024,
         "run_self_supervised_training": False,
         "run_supervised_training": True,
         "early_stopping": True,
@@ -46,6 +47,7 @@ class TabNet(object):
         "dropout_p": 0.3,
         "categorical_variables": [],
         "categorical_config": {},
+        "discrete_target_mapping": {},
         "embedding_dim": 2,
         "discrete_outputs": False,
         "gamma": 1.5,
@@ -86,6 +88,9 @@ class TabNet(object):
                 self.save_params["model_name"],
             )
         )
+        # Populate with dummy data to bypass torch/tensorboard restrictions
+        if len(X_test_cat) == 0:
+            X_test_cat = {-1: torch.zeros(X_test_cont.size()[0])}
         writer.add_graph(
             self.model,
             [
@@ -653,11 +658,11 @@ class TabNet(object):
         # Cast DataFrames to numpy arrays
         if isinstance(X_train, pd.DataFrame):
             X_train = X_train.values
-        if isinstance(y_train, pd.DataFrame):
+        if isinstance(y_train, pd.DataFrame) or isinstance(y_train, pd.Series):
             y_train = y_train.values
         if isinstance(X_val, pd.DataFrame):
             X_val = X_val.values
-        if isinstance(y_val, pd.DataFrame):
+        if isinstance(y_val, pd.DataFrame) or isinstance(y_val, pd.Series):
             y_val = y_val.values
 
         # Build generators for train / validation
@@ -800,6 +805,7 @@ class TabNet(object):
                     y_val_pred = y_pred_logits.squeeze()
                 out_y_pred.append(y_val_pred)
             y_pred_agg = torch.cat(out_y_pred, dim=0).squeeze()
+        self.model.train()  # Enable training mode
         return y_pred_agg
 
     def predict_proba(self, X, batch_size=1024):
