@@ -724,6 +724,8 @@ class TabNet(object):
             )
             self.model = TabNetModel(**self.model_params)
             self.model.to(self.device)
+            for param in self.model.parameters():
+                print(param, param.device())
 
         X_test_batch_cont, X_test_batch_cat, _ = train_data.random_batch(
             self.train_params["batch_size"]
