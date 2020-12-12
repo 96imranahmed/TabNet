@@ -51,6 +51,11 @@ class TabNetModel(nn.Module):
             self.params["n_dims_d"], self.params["n_output_dims"]
         )
 
+        self.batch_norm = nn.BatchNorm1d(
+            self.params["n_input_dims"],
+            momentum=self.params["batch_norm_momentum"],
+        )
+
     def forward(self, X_continuous, X_embedding, init_mask, mask_input=False):
         if len(list(X_continuous.size())) != 2:
             raise ValueError(
@@ -68,10 +73,7 @@ class TabNetModel(nn.Module):
         )
         if mask_input:
             X = init_mask * X
-        X_bn = nn.BatchNorm1d(
-            self.params["n_input_dims"],
-            momentum=self.params["batch_norm_momentum"],
-        )(X)
+        X_bn = self.batch_norm(X)
         a_i_minus_1 = self.__feature_transformer_individual_base(
             self.__feature_transformer_shared(X_bn)
         )[..., self.params["n_dims_d"] :]
