@@ -128,6 +128,7 @@ class TabNet(object):
             )
             model = TabNetModel(**model_params)
             model.load_state_dict(model_state_dict)
+            model.to(self.device)
             return model_params, model
         except:
             print(
@@ -722,7 +723,7 @@ class TabNet(object):
                 }
             )
             self.model = TabNetModel(**self.model_params)
-        self.model.to(self.device)
+            self.model.to(self.device)
 
         X_test_batch_cont, X_test_batch_cat, _ = train_data.random_batch(
             self.train_params["batch_size"]
