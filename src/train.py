@@ -170,7 +170,7 @@ class TabNet(object):
             print("Device configuration: Cuda not available - check GPU configuration.")
         self.device = torch.device("cuda:0" if use_cuda_available else "cpu")
         print(
-            "Device configuration: using {} for training/inference".format(self.device)
+            "Device configuration: Using {} for training/inference".format(self.device)
         )
         torch.backends.cudnn.benchmark = True  # Cudnn configuration
 
@@ -743,7 +743,7 @@ class TabNet(object):
                 step_offset=step,
             )
         if self.train_params["run_supervised_training"]:
-            print("Training model with predictive objective...")
+            print("Training model with predictive objective")
             step = self.__train(
                 train_generator=train_generator,
                 val_generator=val_generator,
@@ -765,25 +765,34 @@ class TabNet(object):
             )
 
         self.model.eval()
+        data_columns = None
+        if isinstance(X, pd.DataFrame):
+            data_columns = dict(zip(X.columns, range(X.shape[1])))
+        else:
+            data_columns = dict(zip(range(X.shape[1]), range(X.shape[1])))
+        if isinstance(X, pd.DataFrame):
+            X = X.values
+        pred_data = utils.InferenceDataset(
+            X,
+            self.model_params["categorical_config"],
+            columns=data_columns,
+        )
         with torch.no_grad():
-            pred_data = utils.InferenceDataset(X)
+
             pred_generator = torch.utils.data.DataLoader(
                 pred_data, **{"batch_size": batch_size, "shuffle": False}
             )
 
             out_y_pred = []
-            for batch_idx, (x_batch_cont, x_batch_cat, y_batch) in enumerate(
-                pred_generator
-            ):
+            for batch_idx, (x_batch_cont, x_batch_cat) in enumerate(pred_generator):
                 x_batch_cont = x_batch_cont.to(self.device)
                 x_batch_cat = OrderedDict(
                     {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
                 )
-                y_batch = y_batch.to(self.device)
                 ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
                 y_val_pred = None
                 x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
-                    x_batch_cont, x_batch_cat, ones_mask - self_supervised_mask
+                    x_batch_cont, x_batch_cat, ones_mask
                 )
                 if self.model_params["discrete_outputs"]:
                     y_val_pred = nn.functional.softmax(y_pred_logits, dim=-1)
@@ -816,7 +825,7 @@ class TabNet(object):
             raise ValueError("`Predict_proba` not available for regression models")
         else:
             ret_data = pd.DataFrame(self.__predict(X, batch_size=batch_size).numpy())
-            ret_data.columns = utils.map_ordinal_to_categorical(
+            ret_data.columns = utils.map_ordinals_to_categoricals(
                 np.array(ret_data.columns), self.model_params["discrete_target_mapping"]
             )
             return ret_data
@@ -835,7 +844,7 @@ class TabNet(object):
         y : List of predictions for input features
         """
         if self.model_params["discrete_outputs"]:
-            return utils.map_ordinal_to_categorical(
+            return utils.map_ordinals_to_categoricals(
                 torch.argmax(self.__predict(X, batch_size=batch_size), dim=-1),
                 self.model_params["discrete_target_mapping"],
             )

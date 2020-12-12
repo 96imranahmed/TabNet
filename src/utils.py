@@ -106,7 +106,7 @@ class InferenceDataset(torch.utils.data.Dataset):
             self.X = (torch.from_numpy(X).float(), OrderedDict())
 
     def __len__(self):
-        return len(self.X)
+        return len(self.X[0])
 
     def __getitem__(self, index):
         return (

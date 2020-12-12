@@ -4,6 +4,7 @@ import pandas as pd
 import pickle
 import numpy as np
 from xgboost import XGBClassifier
+from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 
 sys.path.append(os.path.abspath("../../src/"))
@@ -55,6 +56,27 @@ if __name__ == "__main__":
         X, y, test_size=0.33, random_state=data_params["random_seed"]
     )
 
+    y_train_copy, y_val_copy = (
+        y_train.copy(),
+        y_val.copy(),
+    )
+    enc = LabelEncoder()
+    y_train_copy = enc.fit_transform(y_train_copy)
+    y_val_copy = enc.fit_transform(y_val_copy)
+
+    # XGBoost training
+    print("############# Training XGBoost model")
+    fc_xgboost_model = XGBClassifier(n_estimators=200, verbosity=1)
+    fc_xgboost_model.fit(
+        X_train,
+        y_train_copy,
+        eval_set=[(X_val, y_val_copy)],
+        early_stopping_rounds=20,
+    )
+    y_val_predict_xgb = fc_xgboost_model.predict(X_val)
+
+    # TabNet training
+    print("############# Training TabNet model")
     fc_tabnet_model = TabNet(model_params=model_params)
     fc_tabnet_model.fit(
         X_train,
@@ -68,18 +90,16 @@ if __name__ == "__main__":
             "save_folder": data_params["model_save_dir"],
         },
     )
-    save_file = fc_tabnet_model.model_save_path
-    # save_file = "../../runs/forest_cover//1605278053_forest_cover_predictive_model_final.pt"
     fc_tabnet_model = TabNet(save_file=save_file)
-
-    fc_xgboost_model = XGBClassifier(n_estimators=1000)
-    fc_xgboost_model.fit(
-        X_train, y_train, eval_set=[(X_val, y_val)], early_stopping_rounds=20
-    )
 
     y_tabnet_val_pred = fc_tabnet_model.predict(X_val)
     print(
         "TabNet accuracy: {}".format(
             np.round((y_tabnet_val_pred == y_val).sum() / len(y_val), 3)
+        )
+    )
+    print(
+        "XGBoost accuracy: {}".format(
+            np.round((y_val_predict_xgb == y_val_copy).sum() / len(y_val_copy), 3)
         )
     )
