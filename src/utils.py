@@ -48,23 +48,25 @@ class TrainingDataset(torch.utils.data.Dataset):
             ):
                 X_slices[val["idx"]] = map_categoricals_to_ordinals(
                     X[:, val["idx"]], val["map"]
-                )
+                ).to(self.device)
             idx_slice = sorted([val["idx"] for key, val in categorical_mapping.items()])
-            X_continuous = torch.from_numpy(
-                np.delete(X, idx_slice, -1).astype(float)
-            ).float()
+            X_continuous = (
+                torch.from_numpy(np.delete(X, idx_slice, -1).astype(float))
+                .float()
+                .to(self.device)
+            )
             self.X = (X_continuous, X_slices)
         else:
-            self.X = (torch.from_numpy(X).float(), OrderedDict())
+            self.X = (torch.from_numpy(X).float().to(self.device), OrderedDict())
 
         # Preprocess targets
         if output_mapping:
-            self.y = map_categoricals_to_ordinals(y, output_mapping)
+            self.y = map_categoricals_to_ordinals(y, output_mapping).to(self.device)
             self.n_output_dims = len(output_mapping.keys())
         else:
             self.y = torch.from_numpy(y.astype(float)).float()
             if len(self.y.size()) == 1:
-                self.y = self.y.unsqueeze(-1)
+                self.y = self.y.unsqueeze(-1).to(self.device)
             self.n_output_dims = list(self.y.size())[-1]
 
     def __len__(self):
@@ -72,11 +74,9 @@ class TrainingDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         return (
-            self.X[0][index, ...].to(self.device),
-            OrderedDict(
-                {key: self.X[1][key][index, ...].to(self.device) for key in self.X[1]}
-            ),
-            self.y[index, ...].to(self.device),
+            self.X[0][index, ...],
+            OrderedDict({key: self.X[1][key][index, ...] for key in self.X[1]}),
+            self.y[index, ...],
         )
 
     def random_batch(self, n_samples):
@@ -109,24 +109,22 @@ class InferenceDataset(torch.utils.data.Dataset):
             ):
                 X_slices[val["idx"]] = map_categoricals_to_ordinals(
                     X[:, val["idx"]], val["map"]
-                )
+                ).to(self.device)
             idx_slice = sorted([val["idx"] for key, val in categorical_mapping.items()])
             X_continuous = torch.from_numpy(
                 np.delete(X, idx_slice, -1).astype(float)
             ).float()
-            self.X = (X_continuous, X_slices)
+            self.X = (X_continuous.to(self.device), X_slices)
         else:
-            self.X = (torch.from_numpy(X).float(), OrderedDict())
+            self.X = (torch.from_numpy(X).float().to(self.device), OrderedDict())
 
     def __len__(self):
         return len(self.X[0])
 
     def __getitem__(self, index):
         return (
-            self.X[0][index, ...].to(self.device),
-            OrderedDict(
-                {key: self.X[1][key][index, ...].to(self.device) for key in self.X[1]}
-            ),
+            self.X[0][index, ...],
+            OrderedDict({key: self.X[1][key][index, ...] for key in self.X[1]}),
         )
 
 

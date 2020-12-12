@@ -709,16 +709,15 @@ class TabNet(object):
             self.model = TabNetModel(**self.model_params)
             self.model.to(self.device)
 
-        for name, param in self.model.named_parameters():
-            print(name, param.device)
-
         X_test_batch_cont, X_test_batch_cat, _ = train_data.random_batch(
             self.train_params["batch_size"]
         )
+        print("Setting-up Tensorboard instance...")
         self.tensorboard_writer = self.__get_tensorboard_writer(
             X_test_batch_cont, X_test_batch_cat
         )
         self.model.train()  # Enable training mode
+        print("Staring training...")
 
         if (
             self.train_params["run_self_supervised_training"] == False
