@@ -14,6 +14,10 @@ class TabNetModel(nn.Module):
         super(TabNetModel, self).__init__()
         self.params.update(kwargs)
 
+        self.__batch_norm = nn.BatchNorm1d(
+            self.params["n_input_dims"],
+            momentum=self.params["batch_norm_momentum"],
+        )
         self.__embedding_layers = nn.ModuleDict()
         for key, val in sorted(
             self.params["categorical_config"].items(), key=lambda k: k[1]["idx"]
@@ -49,11 +53,6 @@ class TabNetModel(nn.Module):
         )
         self.__output_fc = nn.Linear(
             self.params["n_dims_d"], self.params["n_output_dims"]
-        )
-
-        self.__batch_norm = nn.BatchNorm1d(
-            self.params["n_input_dims"],
-            momentum=self.params["___momentum"],
         )
 
     def forward(self, X_continuous, X_embedding, init_mask, mask_input=False):
