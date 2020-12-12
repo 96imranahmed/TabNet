@@ -212,7 +212,9 @@ class TabNet(object):
                     .repeat(1, self.model_params["embedding_dim"])
                 )
                 mask_arr.append(c_mask)
-        return torch.cat([mask[:, mask_keep_idx]] + mask_arr, -1)
+        out_mask = torch.cat([mask[:, mask_keep_idx]] + mask_arr, -1)
+        out_mask.to(self.device)
+        return out_mask
 
     def __get_reconstruction_loss(self, x, x_reconstruction, feature_mask):
         """Compute reconstruction loss as per guidance in paper"""

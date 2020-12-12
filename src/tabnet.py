@@ -138,7 +138,6 @@ class SharedFeatureTransformer(nn.Module):
             momentum=self.params["batch_norm_momentum"],
         )
         self.dropout = nn.Dropout(p=self.params["dropout_p"])
-        pass
 
     def forward(self, X):
         X_slice_one = nn.functional.glu(self.bn_one(self.fc_one(X)))
