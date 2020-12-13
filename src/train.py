@@ -15,6 +15,7 @@ class TabNet(object):
 
     default_train_params = {
         "batch_size": 8192,
+        "validation_batch_size": 1024,
         "run_self_supervised_training": False,
         "run_supervised_training": True,
         "early_stopping": True,
@@ -29,6 +30,7 @@ class TabNet(object):
         "learning_rate": 0.01,
         "learning_rate_decay_factor": 0.95,
         "learning_rate_decay_step_rate": 1000,
+        "weight_decay": 0.001,
         "sparsity_regularization": 0.0001,
         "p_mask": 0.2,
     }
@@ -39,9 +41,13 @@ class TabNet(object):
     }
     default_model_params = {
         "n_steps": 5,
-        "feat_transform_fc_dim": 128,
+        "n_dims_d": 16,
+        "n_dims_a": 16,
+        "batch_norm_momentum": 0.85,
+        "dropout_p": 0.3,
         "categorical_variables": [],
         "categorical_config": {},
+        "discrete_target_mapping": {},
         "embedding_dim": 2,
         "discrete_outputs": False,
         "gamma": 1.5,
@@ -82,6 +88,9 @@ class TabNet(object):
                 self.save_params["model_name"],
             )
         )
+        # Populate with dummy data to bypass torch/tensorboard restrictions
+        if len(X_test_cat) == 0:
+            X_test_cat = {-1: torch.zeros(X_test_cont.size()[0])}
         writer.add_graph(
             self.model,
             [
@@ -119,6 +128,7 @@ class TabNet(object):
             )
             model = TabNetModel(**model_params)
             model.load_state_dict(model_state_dict)
+            model.to(self.device)
             return model_params, model
         except:
             print(
@@ -166,7 +176,7 @@ class TabNet(object):
             print("Device configuration: Cuda not available - check GPU configuration.")
         self.device = torch.device("cuda:0" if use_cuda_available else "cpu")
         print(
-            "Device configuration: using {} for training/inference".format(self.device)
+            "Device configuration: Using {} for training/inference".format(self.device)
         )
         torch.backends.cudnn.benchmark = True  # Cudnn configuration
 
@@ -203,7 +213,15 @@ class TabNet(object):
                     .repeat(1, self.model_params["embedding_dim"])
                 )
                 mask_arr.append(c_mask)
-        return torch.cat([mask[:, mask_keep_idx]] + mask_arr, -1)
+        return torch.cat([mask[:, mask_keep_idx]] + mask_arr, -1).to(self.device)
+
+    def __get_reconstruction_loss(self, x, x_reconstruction, feature_mask):
+        """Compute reconstruction loss as per guidance in paper"""
+        std = torch.std(x.data, dim=0)
+        std[std == 0] = 1  # Correct for cases where std_dev along dimension = 0
+        return torch.norm(
+            (torch.ones_like(x) - feature_mask) * (x_reconstruction - x) / std
+        ).sum()
 
     def __train(
         self,
@@ -234,8 +252,10 @@ class TabNet(object):
         step : The number of steps the model was trained for
         """
         # Define optimizer
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(), lr=self.train_params["learning_rate"]
+        optimizer = torch.optim.Adam(
+            self.model.parameters(),
+            lr=self.train_params["learning_rate"],
+            weight_decay=self.train_params["weight_decay"],
         )
         lambda_scale = lambda epoch: self.train_params["learning_rate_decay_factor"]
         scheduler = torch.optim.lr_scheduler.MultiplicativeLR(
@@ -266,7 +286,7 @@ class TabNet(object):
 
         # Running max
         model_max_state_dict = None
-        model_max_criteria = torch.tensor(float("NaN"))
+        model_max_criteria = torch.tensor(float("NaN")).to(self.device)
 
         # Training
         step = step_offset
@@ -277,13 +297,12 @@ class TabNet(object):
             ):
                 step += 1
 
-                x_batch_cont = x_batch_cont.to(self.device)
-                x_batch_cat = OrderedDict(
-                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
+                criterion_loss, reconstruction_loss, sparsity_loss, masks = (
+                    None,
+                    None,
+                    None,
+                    None,
                 )
-                y_batch = y_batch.to(self.device)
-
-                criterion_loss, reconstruction_loss, sparsity_loss = None, None, None
 
                 ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
                 if self_supervised:
@@ -292,52 +311,47 @@ class TabNet(object):
                     )
 
                     x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
-                        x_batch_cont, x_batch_cat, ones_mask - self_supervised_mask
+                        x_batch_cont, x_batch_cat, self_supervised_mask, mask_input=True
                     )
 
-                    # Define reconstruction loss
-                    std = torch.std(x_embedded.data, dim=0)
-                    std[
-                        std == 0
-                    ] = 1  # Correct for cases where std_dev along dimension 0
-                    reconstruction_loss = torch.norm(
-                        self_supervised_mask * (x_reconstruct_batch - x_embedded) / std
-                    ).sum()
+                    reconstruction_loss = self.__get_reconstruction_loss(
+                        x_embedded, x_reconstruct_batch, self_supervised_mask
+                    )
+
+                else:
+                    x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
+                        x_batch_cont, x_batch_cat, ones_mask, mask_input=False
+                    )
+
+                    # Define criterion loss
+                    if self.model_params["discrete_outputs"]:
+                        y_batch = torch.squeeze(y_batch)
+                    criterion_loss = criterion(y_pred_logits, y_batch)
+
+                # Define sparsity loss
+                sparsity_loss = (
+                    -1
+                    * torch.stack(
+                        [
+                            (c_mask * torch.log(c_mask + self.train_params["epsilon"]))
+                            .sum(dim=-1)
+                            .mean()
+                            for c_mask in masks
+                        ]
+                    ).mean()
+                )
+                if reconstruction_loss:
                     self.tensorboard_writer.add_scalar(
                         "{}/Reconstruction loss".format(print_stub_name),
                         reconstruction_loss,
                         step,
                     )
-                else:
-                    x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
-                        x_batch_cont, x_batch_cat, ones_mask
-                    )
-
-                    # Define criterion loss
-                    y_batch_criterion = y_batch
-                    if self.model_params["discrete_outputs"]:
-                        y_batch_criterion = torch.squeeze(y_batch_criterion)
-                    criterion_loss = criterion(y_pred_logits, y_batch_criterion)
+                if criterion_loss:
                     self.tensorboard_writer.add_scalar(
                         "{}/Criterion loss".format(print_stub_name),
                         criterion_loss,
                         step,
                     )
-
-                # Define sparsity loss
-                sparsity_loss = (
-                    -1
-                    / (self.train_params["batch_size"] * self.model_params["n_steps"])
-                    * torch.stack(
-                        [
-                            torch.mul(
-                                c_mask,
-                                torch.log(c_mask + self.train_params["epsilon"]),
-                            ).sum()
-                            for c_mask in masks
-                        ]
-                    ).sum()
-                )
                 self.tensorboard_writer.add_scalar(
                     "{}/Sparsity loss".format(print_stub_name),
                     sparsity_loss,
@@ -408,7 +422,9 @@ class TabNet(object):
                     ):
                         self.model.load_state_dict(model_max_state_dict)
                         print(
-                            "Early stopping criterion met - ending training, and using best weights..."
+                            "Early stopping criterion met - ending training, and using best weights (val reconstruction loss: {})".format(
+                                np.round(model_max_criteria.item(), 4)
+                            )
                         )
                         break
                 else:
@@ -460,7 +476,9 @@ class TabNet(object):
                     ):
                         self.model.load_state_dict(model_max_state_dict)
                         print(
-                            "Early stopping criterion met - ending training, and using best weights..."
+                            "Early stopping criterion met - ending training, and using best weights (val criterion loss: {})".format(
+                                np.round(model_max_criteria.item(), 4)
+                            )
                         )
                         break
             else:
@@ -490,27 +508,20 @@ class TabNet(object):
         with torch.no_grad():
             out_loss = []
             for batch_idx, (x_batch_cont, x_batch_cat, y_batch) in enumerate(generator):
-                x_batch_cont = x_batch_cont.to(self.device)
-                x_batch_cat = OrderedDict(
-                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
-                )
-                y_batch = y_batch.to(self.device)
                 ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
                 self_supervised_mask = self.__generate_model_mask(
                     self.train_params["p_mask"], x_batch_cont.size()[0]
                 )
                 x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
-                    x_batch_cont, x_batch_cat, ones_mask - self_supervised_mask
+                    x_batch_cont, x_batch_cat, self_supervised_mask, mask_input=True
                 )
 
-                # Define reconstruction loss
-                std = torch.std(x_embedded.data, dim=0)
-                std[std == 0] = 1  # Correct for cases where std_dev along dimension 0
                 out_loss.append(
-                    torch.norm(
-                        self_supervised_mask * (x_reconstruct_batch - x_embedded) / std
-                    ).sum()
+                    self.__get_reconstruction_loss(
+                        x_embedded, x_reconstruct_batch, self_supervised_mask
+                    )
                 )
+
         self.model.train()
         return torch.stack(out_loss).mean()
 
@@ -533,11 +544,6 @@ class TabNet(object):
             out_y_pred_logits = []
             out_y_pred = []
             for batch_idx, (x_batch_cont, x_batch_cat, y_batch) in enumerate(generator):
-                x_batch_cont = x_batch_cont.to(self.device)
-                x_batch_cat = OrderedDict(
-                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
-                )
-                y_batch = y_batch.to(self.device)
                 ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
                 x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
                     x_batch_cont, x_batch_cat, ones_mask
@@ -639,11 +645,11 @@ class TabNet(object):
         # Cast DataFrames to numpy arrays
         if isinstance(X_train, pd.DataFrame):
             X_train = X_train.values
-        if isinstance(y_train, pd.DataFrame):
+        if isinstance(y_train, pd.DataFrame) or isinstance(y_train, pd.Series):
             y_train = y_train.values
         if isinstance(X_val, pd.DataFrame):
             X_val = X_val.values
-        if isinstance(y_val, pd.DataFrame):
+        if isinstance(y_val, pd.DataFrame) or isinstance(y_val, pd.Series):
             y_val = y_val.values
 
         # Build generators for train / validation
@@ -653,6 +659,7 @@ class TabNet(object):
             self.model_params["discrete_target_mapping"],
             self.model_params["categorical_config"],
             columns=data_columns,
+            device=self.device,
         )
         train_generator = torch.utils.data.DataLoader(
             train_data,
@@ -671,10 +678,14 @@ class TabNet(object):
                 output_mapping=self.model_params["discrete_target_mapping"],
                 categorical_mapping=self.model_params["categorical_config"],
                 columns=data_columns,
+                device=self.device,
             )
             val_generator = torch.utils.data.DataLoader(
                 val_data,
-                **{"batch_size": self.train_params["batch_size"], "shuffle": False}
+                **{
+                    "batch_size": self.train_params["validation_batch_size"],
+                    "shuffle": False,
+                }
             )
 
         # Adjust train_data input dims based on categorical embeddings
@@ -698,14 +709,17 @@ class TabNet(object):
                 }
             )
             self.model = TabNetModel(**self.model_params)
+            self.model.to(self.device)
 
         X_test_batch_cont, X_test_batch_cat, _ = train_data.random_batch(
             self.train_params["batch_size"]
         )
+        print("Setting-up Tensorboard instance...")
         self.tensorboard_writer = self.__get_tensorboard_writer(
             X_test_batch_cont, X_test_batch_cat
         )
         self.model.train()  # Enable training mode
+        print("Starting training...")
 
         if (
             self.train_params["run_self_supervised_training"] == False
@@ -726,7 +740,7 @@ class TabNet(object):
                 step_offset=step,
             )
         if self.train_params["run_supervised_training"]:
-            print("Training model with predictive objective self-supervised model...")
+            print("Training model with predictive objective")
             step = self.__train(
                 train_generator=train_generator,
                 val_generator=val_generator,
@@ -748,25 +762,31 @@ class TabNet(object):
             )
 
         self.model.eval()
+        data_columns = None
+        if isinstance(X, pd.DataFrame):
+            data_columns = dict(zip(X.columns, range(X.shape[1])))
+        else:
+            data_columns = dict(zip(range(X.shape[1]), range(X.shape[1])))
+        if isinstance(X, pd.DataFrame):
+            X = X.values
+        pred_data = utils.InferenceDataset(
+            X,
+            self.model_params["categorical_config"],
+            columns=data_columns,
+            device=self.device,
+        )
         with torch.no_grad():
-            pred_data = utils.InferenceDataset(X)
+
             pred_generator = torch.utils.data.DataLoader(
                 pred_data, **{"batch_size": batch_size, "shuffle": False}
             )
 
             out_y_pred = []
-            for batch_idx, (x_batch_cont, x_batch_cat, y_batch) in enumerate(
-                pred_generator
-            ):
-                x_batch_cont = x_batch_cont.to(self.device)
-                x_batch_cat = OrderedDict(
-                    {key: x_batch_cat[key].to(self.device) for key in x_batch_cat}
-                )
-                y_batch = y_batch.to(self.device)
+            for batch_idx, (x_batch_cont, x_batch_cat) in enumerate(pred_generator):
                 ones_mask = self.__generate_model_mask(0, x_batch_cont.size()[0])
                 y_val_pred = None
                 x_embedded, y_pred_logits, x_reconstruct_batch, masks = self.model(
-                    x_batch_cont, x_batch_cat, ones_mask - self_supervised_mask
+                    x_batch_cont, x_batch_cat, ones_mask
                 )
                 if self.model_params["discrete_outputs"]:
                     y_val_pred = nn.functional.softmax(y_pred_logits, dim=-1)
@@ -774,6 +794,7 @@ class TabNet(object):
                     y_val_pred = y_pred_logits.squeeze()
                 out_y_pred.append(y_val_pred)
             y_pred_agg = torch.cat(out_y_pred, dim=0).squeeze()
+        self.model.train()  # Enable training mode
         return y_pred_agg
 
     def predict_proba(self, X, batch_size=1024):
@@ -799,7 +820,7 @@ class TabNet(object):
             raise ValueError("`Predict_proba` not available for regression models")
         else:
             ret_data = pd.DataFrame(self.__predict(X, batch_size=batch_size).numpy())
-            ret_data.columns = utils.map_ordinal_to_categorical(
+            ret_data.columns = utils.map_ordinals_to_categoricals(
                 np.array(ret_data.columns), self.model_params["discrete_target_mapping"]
             )
             return ret_data
@@ -818,7 +839,7 @@ class TabNet(object):
         y : List of predictions for input features
         """
         if self.model_params["discrete_outputs"]:
-            return utils.map_ordinal_to_categorical(
+            return utils.map_ordinals_to_categoricals(
                 torch.argmax(self.__predict(X, batch_size=batch_size), dim=-1),
                 self.model_params["discrete_target_mapping"],
             )

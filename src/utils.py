@@ -18,7 +18,15 @@ class TrainingDataset(torch.utils.data.Dataset):
 
     is_categorical = False
 
-    def __init__(self, X, y, output_mapping, categorical_mapping, columns):
+    def __init__(
+        self,
+        X,
+        y,
+        output_mapping=None,
+        categorical_mapping=None,
+        columns=None,
+        device=None,
+    ):
         """Dataset initialization function.
 
         Parameters
@@ -28,9 +36,10 @@ class TrainingDataset(torch.utils.data.Dataset):
         output_mapping : a mapping of categorical targets to ordinals
         categorical_mapping: mapping data to encode categorical variables
         columns: dataset columns identifiers
+        device: Tensor processing device in-use by PyTorch
         """
         self.columns = columns
-
+        self.device = device
         # Preprocess categoricals
         if categorical_mapping:
             X_slices = OrderedDict()
@@ -39,23 +48,25 @@ class TrainingDataset(torch.utils.data.Dataset):
             ):
                 X_slices[val["idx"]] = map_categoricals_to_ordinals(
                     X[:, val["idx"]], val["map"]
-                )
+                ).to(self.device)
             idx_slice = sorted([val["idx"] for key, val in categorical_mapping.items()])
-            X_continuous = torch.from_numpy(
-                np.delete(X, idx_slice, -1).astype(float)
-            ).float()
+            X_continuous = (
+                torch.from_numpy(np.delete(X, idx_slice, -1).astype(float))
+                .float()
+                .to(self.device)
+            )
             self.X = (X_continuous, X_slices)
         else:
-            self.X = (torch.from_numpy(X).float(), OrderedDict())
+            self.X = (torch.from_numpy(X).float().to(self.device), OrderedDict())
 
         # Preprocess targets
         if output_mapping:
-            self.y = map_categoricals_to_ordinals(y, output_mapping)
+            self.y = map_categoricals_to_ordinals(y, output_mapping).to(self.device)
             self.n_output_dims = len(output_mapping.keys())
         else:
             self.y = torch.from_numpy(y.astype(float)).float()
             if len(self.y.size()) == 1:
-                self.y = self.y.unsqueeze(-1)
+                self.y = self.y.unsqueeze(-1).to(self.device)
             self.n_output_dims = list(self.y.size())[-1]
 
     def __len__(self):
@@ -77,7 +88,7 @@ class TrainingDataset(torch.utils.data.Dataset):
 class InferenceDataset(torch.utils.data.Dataset):
     """Creates a PyTorch Dataset object for a set of points for inference."""
 
-    def __init__(self, X, categorical_mapping=None, columns=None):
+    def __init__(self, X, categorical_mapping=None, columns=None, device=None):
         """Dataset initialization function.
 
         Parameters
@@ -85,8 +96,10 @@ class InferenceDataset(torch.utils.data.Dataset):
         X : Numpy array of input features
         categorical_mapping: mapping data to encode categorical variables
         columns: dataset columns identifiers
+        device: Tensor processing device in-use by PyTorch
         """
         self.columns = columns
+        self.device = device
 
         # Preprocess categoricals
         if categorical_mapping:
@@ -96,17 +109,17 @@ class InferenceDataset(torch.utils.data.Dataset):
             ):
                 X_slices[val["idx"]] = map_categoricals_to_ordinals(
                     X[:, val["idx"]], val["map"]
-                )
+                ).to(self.device)
             idx_slice = sorted([val["idx"] for key, val in categorical_mapping.items()])
             X_continuous = torch.from_numpy(
                 np.delete(X, idx_slice, -1).astype(float)
             ).float()
-            self.X = (X_continuous, X_slices)
+            self.X = (X_continuous.to(self.device), X_slices)
         else:
-            self.X = (torch.from_numpy(X).float(), OrderedDict())
+            self.X = (torch.from_numpy(X).float().to(self.device), OrderedDict())
 
     def __len__(self):
-        return len(self.X)
+        return len(self.X[0])
 
     def __getitem__(self, index):
         return (
