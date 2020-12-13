@@ -422,7 +422,9 @@ class TabNet(object):
                     ):
                         self.model.load_state_dict(model_max_state_dict)
                         print(
-                            "Early stopping criterion met - ending training, and using best weights..."
+                            "Early stopping criterion met - ending training, and using best weights (val reconstruction loss: {})".format(
+                                np.round(model_max_criteria.item(), 4)
+                            )
                         )
                         break
                 else:
@@ -474,7 +476,9 @@ class TabNet(object):
                     ):
                         self.model.load_state_dict(model_max_state_dict)
                         print(
-                            "Early stopping criterion met - ending training, and using best weights..."
+                            "Early stopping criterion met - ending training, and using best weights (val criterion loss: {})".format(
+                                np.round(model_max_criteria.item(), 4)
+                            )
                         )
                         break
             else:
