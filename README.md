@@ -6,9 +6,9 @@ Implements base model code, including categorical embeddings, but does not imple
 
 TabNet should **not act as a replacement to boosted methods** for typical data science use-cases. However, it may provide improved performance in use-cases where the labelled dataset is large (e.g., mullions of examples), or in situations where only an unsupervised model is needed (e.g., fraud detection).
 
-- **Performance: **While the paper demonstrates promising results, my TabNet implemention underperformed XGBoost in `adult_census` and only slightly outperformed XGBoost in `forest_census` (likely driven by the larger size of the dataset). These results are produced without hyperparamater tuning.
-- **Training time: **The training time for TabNet models is considerably higher than the XGBoost counterpart on CPU, though this difference is lower on GPU. As such, TabNet should only be considered when plenty of samples are available (e.g., as with `Forest Cover`)
-- **Interpretability: **Aside from visualising the embedding space of categorical features, the vanilla TabNet model does not provide much additional interpretability over the importance plots already available in XGBoost. 
+- **Performance:** While the paper demonstrates promising results, my TabNet implemention underperformed XGBoost in `adult_census` and only slightly outperformed XGBoost in `forest_census` (likely driven by the larger size of the dataset). These results are produced without hyperparamater tuning.
+- **Training time:** The training time for TabNet models is considerably higher than the XGBoost counterpart on CPU, though this difference is lower on GPU. As such, TabNet should only be considered when plenty of samples are available (e.g., as with `Forest Cover`)
+- **Interpretability:** Aside from visualising the embedding space of categorical features, the vanilla TabNet model does not provide much additional interpretability over the importance plots already available in XGBoost. 
 
 
 ## Results
