@@ -17,7 +17,6 @@ TabNet should **not act as a replacement to boosted methods** for typical data s
 | :------------ |:------------:| :-----:|
 | [Adult Census](https://www.kaggle.com/uciml/adult-census-income "Adult Census")     | 0.867 | 0.847 |
 | [Forest Cover](https://www.kaggle.com/uciml/forest-cover-type-dataset "Forest Cover")      |  0.919        |   0.953 |
-| [Poker Hand](https://archive.ics.uci.edu/ml/datasets/Poker+Hand "Poker Hand") | 0.837 |    XXX |
 
 Note: Tests can be replicated by running the appropriate files in `/tests/examples`. Datasets will be downloaded with the repository.
 
