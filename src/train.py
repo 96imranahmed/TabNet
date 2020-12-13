@@ -331,16 +331,14 @@ class TabNet(object):
                 # Define sparsity loss
                 sparsity_loss = (
                     -1
-                    / (self.train_params["batch_size"] * self.model_params["n_steps"])
                     * torch.stack(
                         [
-                            torch.mul(
-                                c_mask,
-                                torch.log(c_mask + self.train_params["epsilon"]),
-                            ).sum()
+                            (c_mask * torch.log(c_mask + self.train_params["epsilon"]))
+                            .sum(dim=-1)
+                            .mean()
                             for c_mask in masks
                         ]
-                    ).sum()
+                    ).mean()
                 )
                 if reconstruction_loss:
                     self.tensorboard_writer.add_scalar(
